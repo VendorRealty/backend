@@ -1,0 +1,14 @@
+{
+  "plumbers": [
+    "ABC Plumbing",
+    "BestFlow Ltd."
+  ],
+  "electricians": [
+    "XYZ Electric",
+    "Northern Lights Electrical"
+  ],
+  "general_contractors": [
+    "Delta Contracting Inc.",
+    "BuildRight Homes"
+  ]
+}
