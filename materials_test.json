@@ -1,0 +1,16 @@
+[
+  {
+    "name": "2x4x8 SPF lumber",
+    "quantity": 200,
+    "unit": "piece",
+    "spec": "SPF stud grade",
+    "vendor_preferences": ["Home Depot Canada", "RONA", "Lowe's Canada"]
+  },
+  {
+    "name": "OSB sheathing 7/16 in 4x8",
+    "quantity": 80,
+    "unit": "sheet",
+    "spec": "7/16 in OSB",
+    "vendor_preferences": ["Home Depot Canada", "RONA", "Lowe's Canada"]
+  }
+]
