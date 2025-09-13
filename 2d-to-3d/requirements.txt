@@ -1,0 +1,16 @@
+annotated-types>=0.7,<0.8
+fastapi==0.116.1
+# Starlette must match FastAPI's supported range for 0.116.x
+starlette>=0.40,<0.48
+pydantic>=2.11,<3
+python-multipart>=0.0.18,<0.1
+uvicorn>=0.30,<0.36
+
+# Direct runtime deps used by your code
+numpy>=2.3,<3
+pillow>=10,<12
+trimesh>=4.4,<5
+opencv-python-headless>=4.8,<5
+shapely>=2.0,<3
+mapbox_earcut>=1.0,<2
+easyocr>=1.7,<2
