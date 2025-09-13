@@ -1,19 +1,31 @@
 from io import BytesIO
+from typing import Dict, List, Optional
+from datetime import datetime
 
 import numpy as np
 import trimesh
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from pydantic import BaseModel
 from PIL import Image, ImageFilter, ImageOps, ImageDraw
 import cv2
 import easyocr
+
+# Import compliance engine
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from compliance.compliance_engine import OntarioBuildingCodeEngine
 
 origins = [
     "*"
 ]
 
-app = FastAPI(title="PNG to STL Converter", version="0.1.0")
+app = FastAPI(title="CAD Processing & Compliance API", version="0.2.0")
+
+# Initialize compliance engine
+compliance_engine = OntarioBuildingCodeEngine()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -491,5 +503,270 @@ async def convert_endpoint(
 
 @app.get("/")
 async def root():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "0.2.0", "features": ["2d-to-3d", "cad-processing", "compliance"]}
+
+
+def detect_room_boundaries_from_image(processed_mask: np.ndarray) -> List[Dict]:
+    """Extract room boundaries from processed floor plan image"""
+    # Find contours for room boundaries
+    contours, _ = cv2.findContours(
+        processed_mask.astype(np.uint8), 
+        cv2.RETR_EXTERNAL, 
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+    
+    rooms = []
+    for i, contour in enumerate(contours):
+        area = cv2.contourArea(contour)
+        if area < 1000:  # Skip very small areas
+            continue
+            
+        # Calculate bounding box and room properties
+        x, y, w, h = cv2.boundingRect(contour)
+        M = cv2.moments(contour)
+        cx = int(M['m10'] / M['m00']) if M['m00'] != 0 else x + w // 2
+        cy = int(M['m01'] / M['m00']) if M['m00'] != 0 else y + h // 2
+        
+        rooms.append({
+            "id": i + 1,
+            "area_pixels": float(area),
+            "bounding_box": {"x": int(x), "y": int(y), "width": int(w), "height": int(h)},
+            "centroid": [cx, cy],
+            "contour": contour.tolist()
+        })
+    
+    return rooms
+
+
+def extract_walls_from_image(processed_mask: np.ndarray) -> List[Dict]:
+    """Extract wall segments from floor plan image"""
+    # Detect edges
+    edges = cv2.Canny(processed_mask.astype(np.uint8), 50, 150)
+    
+    # Detect lines using Hough transform
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, minLineLength=50, maxLineGap=10)
+    
+    walls = []
+    if lines is not None:
+        for i, line in enumerate(lines):
+            x1, y1, x2, y2 = line[0]
+            length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
+            walls.append({
+                "id": i + 1,
+                "type": "wall",
+                "start": [int(x1), int(y1)],
+                "end": [int(x2), int(y2)],
+                "length": float(length)
+            })
+    
+    return walls
+
+
+def generate_intelligent_openings(walls: List[Dict], rooms: List[Dict]) -> List[Dict]:
+    """
+    Intelligently generate door and window placements based on room layout
+    Since floor plan data quality is often poor, we use heuristics to place openings
+    """
+    openings = []
+    
+    for room in rooms:
+        room_area = room.get('area_pixels', 0) * 0.01  # Convert to approximate sq ft
+        bbox = room.get('bounding_box', {})
+        
+        # Generate doors - typically one per room, two for large rooms
+        num_doors = 1 if room_area < 200 else 2
+        for door_idx in range(num_doors):
+            # Place door on longer wall
+            if bbox.get('width', 0) > bbox.get('height', 0):
+                door_x = bbox['x'] + bbox['width'] // (num_doors + 1) * (door_idx + 1)
+                door_y = bbox['y'] if door_idx == 0 else bbox['y'] + bbox['height']
+            else:
+                door_x = bbox['x'] if door_idx == 0 else bbox['x'] + bbox['width']
+                door_y = bbox['y'] + bbox['height'] // (num_doors + 1) * (door_idx + 1)
+            
+            openings.append({
+                "type": "door",
+                "width": 36,  # Standard door width in inches
+                "height": 80,  # Standard door height
+                "position": [door_x, door_y],
+                "room_id": room['id'],
+                "generated": True
+            })
+        
+        # Generate windows based on room size and building code requirements
+        # Minimum window area = 10% of floor area for natural light (OBC requirement)
+        required_window_area = room_area * 0.1 * 144  # Convert to sq inches
+        window_size = 48 * 36  # Standard window 48"x36"
+        num_windows = max(1, int(required_window_area / window_size))
+        
+        # Place windows evenly on exterior walls
+        for window_idx in range(num_windows):
+            # Assume top and right walls are more likely exterior
+            if window_idx % 2 == 0:
+                window_x = bbox['x'] + bbox['width'] // (num_windows + 1) * (window_idx + 1)
+                window_y = bbox['y']
+            else:
+                window_x = bbox['x'] + bbox['width']
+                window_y = bbox['y'] + bbox['height'] // (num_windows + 1) * (window_idx + 1)
+            
+            openings.append({
+                "type": "window",
+                "width": 48,
+                "height": 36,
+                "sill_height": 30,  # Standard sill height from floor
+                "position": [window_x, window_y],
+                "room_id": room['id'],
+                "generated": True,
+                "egress_compliant": window_size >= 619  # Min egress area in sq inches
+            })
+    
+    return openings
+
+
+@app.post("/api/process_floorplan")
+async def process_floorplan_endpoint(
+    image: UploadFile = File(..., description="Floor plan image (PNG, JPG)"),
+    generate_3d: bool = Form(False),
+    check_compliance: bool = Form(True)
+):
+    """
+    Process floor plan image to extract architectural elements
+    Returns rooms, walls, and intelligently placed doors/windows
+    """
+    contents = await image.read()
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large. Max {MAX_UPLOAD_BYTES // (1024*1024)} MB")
+    
+    # Load and process image
+    img = _load_png_as_grayscale(contents)
+    img = _downsample(img, 1024)
+    
+    # Extract architectural elements
+    processed_mask = _preprocess_to_heightmap(
+        img_gray=img,
+        invert=True,
+        binary=True,
+        smooth_radius=0.25,
+        open_size=2,
+        close_size=3,
+        dilate_size=1,
+        median_size=3,
+        keep_largest=150,
+        min_area_ratio=0.00003,
+    )
+    
+    # Detect rooms and walls
+    rooms = detect_room_boundaries_from_image(processed_mask)
+    walls = extract_walls_from_image(processed_mask)
+    
+    # Generate intelligent door/window placements
+    openings = generate_intelligent_openings(walls, rooms)
+    
+    floor_plan_data = {
+        "type": "floor_plan_analysis",
+        "rooms": rooms,
+        "walls": walls,
+        "openings": openings,
+        "metadata": {
+            "filename": image.filename,
+            "processed_at": datetime.now().isoformat(),
+            "openings_generated": True,
+            "total_rooms": len(rooms),
+            "total_walls": len(walls),
+            "total_openings": len(openings)
+        }
+    }
+    
+    response = {"floor_plan_analysis": floor_plan_data}
+    
+    # Check compliance if requested
+    if check_compliance:
+        compliance_results = compliance_engine.check_compliance(floor_plan_data)
+        routing_suggestions = compliance_engine.generate_compliance_suggestions(floor_plan_data)
+        
+        response["compliance_analysis"] = {
+            "compliance_status": "pass" if not any(i.severity == "error" for i in compliance_results) else "fail",
+            "issues": [
+                {
+                    "system": issue.system,
+                    "code_reference": issue.code_reference,
+                    "severity": issue.severity,
+                    "message": issue.message,
+                    "location": issue.location,
+                    "suggested_fix": issue.suggested_fix
+                }
+                for issue in compliance_results
+            ],
+            "summary": {
+                "total_issues": len(compliance_results),
+                "errors": sum(1 for i in compliance_results if i.severity == "error"),
+                "warnings": sum(1 for i in compliance_results if i.severity == "warning"),
+                "info": sum(1 for i in compliance_results if i.severity == "info")
+            },
+            "routing_suggestions": routing_suggestions
+        }
+    
+    # Generate 3D model if requested
+    if generate_3d:
+        # Convert to 3D heightmap
+        z_map = 1.0 + processed_mask * 10.0  # Base + walls height
+        mesh = _heightmap_mesh(z_map, scale_mm_per_px=0.2)
+        buffer = BytesIO()
+        mesh.export(buffer, file_type="stl")
+        # Convert to base64 for JSON response
+        import base64
+        stl_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        response["model_3d"] = {
+            "format": "stl",
+            "encoding": "base64",
+            "data": stl_base64
+        }
+    
+    return response
+
+
+class ComplianceCheckRequest(BaseModel):
+    floor_plan_data: Dict
+    system_type: Optional[str] = None
+    generate_suggestions: bool = True
+
+
+@app.post("/api/check_compliance")
+async def check_compliance_endpoint(request: ComplianceCheckRequest):
+    """
+    Check building code compliance for processed floor plan data
+    """
+    try:
+        # Run compliance checks
+        issues = compliance_engine.check_compliance(request.floor_plan_data, request.system_type)
+        
+        response = {
+            "compliance_status": "pass" if not any(i.severity == "error" for i in issues) else "fail",
+            "issues": [
+                {
+                    "system": issue.system,
+                    "code_reference": issue.code_reference,
+                    "severity": issue.severity,
+                    "message": issue.message,
+                    "location": issue.location,
+                    "suggested_fix": issue.suggested_fix
+                }
+                for issue in issues
+            ],
+            "summary": {
+                "total_issues": len(issues),
+                "errors": sum(1 for i in issues if i.severity == "error"),
+                "warnings": sum(1 for i in issues if i.severity == "warning"),
+                "info": sum(1 for i in issues if i.severity == "info")
+            }
+        }
+        
+        # Generate routing suggestions if requested
+        if request.generate_suggestions:
+            response["routing_suggestions"] = compliance_engine.generate_compliance_suggestions(request.floor_plan_data)
+        
+        return response
+        
+    except Exception as e:
+        raise HTTPException(500, f"Compliance check failed: {e}")
 

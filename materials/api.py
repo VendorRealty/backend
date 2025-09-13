@@ -6,6 +6,13 @@ from typing import Any, Dict, List
 
 from fastapi import FastAPI, HTTPException
 
+# Load .env if present (in addition to material_search doing so) so env is available early
+try:
+    from dotenv import load_dotenv, find_dotenv
+    load_dotenv(find_dotenv(), override=False)
+except Exception:
+    pass
+
 # Reuse the existing logic from material_search
 from .material_search import (
     call_groq,
@@ -46,7 +53,14 @@ async def estimate(payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="GROQ_API_KEY not set on server")
 
     try:
-        raw = call_groq(materials, currency=currency, max_vendors=max_vendors, model=model)
+        raw = call_groq(
+            materials,
+            currency=currency,
+            max_vendors=max_vendors,
+            model=model,
+            use_browse=True,                 # enable web browsing for real pricing
+            max_completion_tokens=1200,      # allow sufficient space for full JSON
+        )
     except Exception as e:  # surfacing any upstream error
         raise HTTPException(status_code=502, detail=f"Upstream Groq error: {e}")
 

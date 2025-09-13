@@ -18,3 +18,9 @@ shapely>=2.0,<3
 mapbox_earcut>=1.0,<2
 easyocr>=1.7,<2
 
+# Compliance and CAD processing (optional, install as needed)
+# openai>=1.0.0,<2.0.0  # For AI-powered compliance suggestions
+# ezdxf>=1.0.0,<2.0.0  # For DXF CAD file processing
+# PyMuPDF>=1.23.0,<2.0.0  # For PDF floor plan processing
+# pdf2image>=1.16.0,<2.0.0  # For PDF to image conversion
+
