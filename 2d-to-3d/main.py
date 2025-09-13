@@ -3,14 +3,27 @@ from io import BytesIO
 import numpy as np
 import trimesh
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from PIL import Image, ImageFilter, ImageOps, ImageDraw
 import cv2
 import easyocr
 
-MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+origins = [
+    "*"
+]
 
 app = FastAPI(title="PNG to STL Converter", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+
 
 # Conservative preprocessing defaults (tuned for floor plans)
 DEFAULT_INVERT = True
