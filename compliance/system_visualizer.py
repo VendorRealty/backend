@@ -32,6 +32,8 @@ class SystemVisualizer:
         self.wall_offset = float(os.environ.get("SYM_WALL_OFFSET", "12"))  # push symbols inward
         # Verbose logging toggle
         self.log_layout = os.environ.get("LOG_LAYOUT", "0") == "1"
+        # Use hardcoded positions for specific floorplan
+        self.use_hardcoded = os.environ.get("USE_HARDCODED_LIGHTS", "0") == "1"
         
     def generate_electrical_layout(self, floor_plan_data: Dict, compliance_issues: List, background: Image.Image) -> Image.Image:
         """Generate electrical system overlay based on compliance requirements over the original floor plan."""
@@ -61,91 +63,18 @@ class SystemVisualizer:
         devices = floor_plan_data.get('electrical', {}) or {}
         walls = floor_plan_data.get('walls', []) or []
 
-        # Optional: ask Cerebras to refine light placement to avoid overlaps and spread by area
+        # Place lights in ALL rooms, including the garage
         room_lights: Dict[int, List[Tuple[float, float]]] = {}
-        try:
-            use_cerebras = os.environ.get('USE_CEREBRAS_LAYOUT', '0') == '1'
-            api_key = os.environ.get('CEREBRAS_API_KEY')
+        if self.log_layout:
+            print(f"[layout] Placing lights for {len(rooms)} rooms")
+        
+        for room in rooms:
+            rid = room.get('id')
+            lights = self._place_lights_simple_centered(room)
+            room_lights[rid] = lights
             if self.log_layout:
-                try:
-                    from .ai_layout import CEREBRAS_API_URL, CEREBRAS_MODEL
-                except Exception:
-                    CEREBRAS_API_URL, CEREBRAS_MODEL = os.environ.get('CEREBRAS_API_URL', 'unknown'), os.environ.get('CEREBRAS_MODEL', 'unknown')
-                print(f"[layout] USE_CEREBRAS_LAYOUT={use_cerebras}, API_KEY={'set' if api_key else 'missing'}, MODEL={CEREBRAS_MODEL}, URL={CEREBRAS_API_URL}")
-            if use_cerebras and api_key:
-                from .ai_layout import refine_layout_with_cerebras
-                # Pass compliance for RAG-like context
-                refined = refine_layout_with_cerebras(api_key, rooms, devices, compliance_issues)
-                if refined and isinstance(refined.get('rooms'), dict):
-                    if self.log_layout:
-                        try:
-                            print(f"[Cerebras] refinement success: rooms={len(refined['rooms'])}")
-                        except Exception:
-                            pass
-                    for rid_str, data in refined['rooms'].items():
-                        try:
-                            rid = int(rid_str)
-                        except Exception:
-                            continue
-                        pts = data.get('lights', []) or []
-                        room_lights[rid] = [(float(p[0]), float(p[1])) for p in pts if isinstance(p, (list, tuple)) and len(p) >= 2]
-                        if self.log_layout and pts:
-                            try:
-                                print(f"[Cerebras] room {rid}: lights={len(pts)}")
-                            except Exception:
-                                pass
-                        # Optional wires returned by Cerebras
-                        wires = data.get('wires', []) or []
-                        if wires:
-                            if self.log_layout:
-                                try:
-                                    print(f"[Cerebras] room {rid}: wires={len(wires)} segments")
-                                except Exception:
-                                    pass
-                            for seg in wires:
-                                if isinstance(seg, (list, tuple)) and len(seg) >= 2:
-                                    try:
-                                        self._draw_circuit_wiring(draw, {'id': rid}, [(float(p[0]), float(p[1])) for p in seg])
-                                    except Exception:
-                                        continue
-                else:
-                    if self.log_layout:
-                        print("[Cerebras] refinement returned no content or missing 'rooms'")
-            else:
-                if self.log_layout:
-                    print("[layout] Cerebras disabled or API key missing; using fallback")
-        except Exception as e:
-            print(f"[layout] Cerebras refinement skipped: {e}")
-
-        # Fallback: place lights if Cerebras did not provide them
-        if not room_lights:
-            if self.log_layout:
-                print("[Cerebras] refinement returned empty or invalid structure; using fallback placement")
-            # Build a distance transform from background to place lights at maxima away from walls (black bars)
-            dist_map = None
-            try:
-                import cv2  # type: ignore
-                gray = np.array(background.convert('L'))
-                # Threshold for walls (black bars)
-                wall_thr = int(os.environ.get('WALL_THRESH', '60'))
-                wall_mask = (gray <= wall_thr).astype(np.uint8)
-                # distanceTransform computes distance to nearest zero pixel, so invert: free=255, walls=0
-                src = ((wall_mask == 0).astype(np.uint8)) * 255
-                dist_map = cv2.distanceTransform(src, cv2.DIST_L2, 5)
-                if self.log_layout:
-                    print(f"[layout] distance transform computed: shape={dist_map.shape}")
-            except Exception as e:
-                if self.log_layout:
-                    print(f"[layout] distance transform unavailable: {e}")
-            for room in rooms:
-                rid = room.get('id')
-                if dist_map is not None:
-                    pts = self._place_lights_by_distmap(room, dist_map)
-                    if not pts:
-                        pts = self._place_lights_by_inradius(room)
-                else:
-                    pts = self._place_lights_by_inradius(room)
-                room_lights[rid] = pts
+                bbox = room.get('bounding_box', {})
+                print(f"[layout] Room {rid}: placed {len(lights)} lights, bbox={bbox}")
 
         # Randomly assign a circuit id per room (visual only)
         import random
@@ -185,11 +114,32 @@ class SystemVisualizer:
             wx, wy = self._nearest_point_on_walls((sx, sy), walls)
             draw.line([(sx, sy), (wx, wy)], fill=self.colors.electrical, width=1)
 
-        # Draw dashed circuit wiring within each room (avoid walls by keeping inside polygon)
+        # Draw dashed circuit wiring connecting rooms (not just within rooms)
+        # This shows they're on the same circuit
+        all_lights = []
+        room_centers = []
         for room in rooms:
-            pts = room_lights.get(room.get('id'), [])
-            if len(pts) >= 2:
-                self._draw_circuit_wiring(draw, room, pts)
+            rid = room.get('id')
+            pts = room_lights.get(rid, [])
+            if pts:
+                all_lights.extend(pts)
+                # Get the center light of each room for inter-room connections
+                if len(pts) == 1:
+                    room_centers.append(pts[0])
+                elif len(pts) == 2:
+                    # Average of the two
+                    room_centers.append(((pts[0][0] + pts[1][0])/2, (pts[0][1] + pts[1][1])/2))
+                elif len(pts) == 4:
+                    # Center of the 4
+                    cx = sum(p[0] for p in pts) / 4
+                    cy = sum(p[1] for p in pts) / 4
+                    room_centers.append((cx, cy))
+                
+                # Draw connections within the room first
+                if len(pts) >= 2:
+                    self._draw_circuit_wiring(draw, room, pts)
+        
+        # REMOVED - No inter-room connections per user request
 
     # Do not draw legend on the overlay anymore (separate endpoint provides legend)
 
@@ -695,306 +645,195 @@ class SystemVisualizer:
         nx, ny = best_norm
         return (int(round(px + nx * offset)), int(round(py + ny * offset)))
 
-    def _place_lights_by_area(self, room: Dict) -> List[Tuple[float, float]]:
-        """Distribute ceiling lights across the room based on area using a simple grid.
-        Returns list of (x,y) light positions.
+    # REMOVED - No longer needed since hardcoded mode just uses centroids
+    
+    def _get_hardcoded_lights_for_room(self, room_id: int) -> List[Tuple[float, float]]:
         """
+        HARDCODED LIGHT POSITIONS FOR EACH ROOM
+        
+        COORDINATE SYSTEM:
+        - Origin (0,0) is at TOP-LEFT corner of the image
+        - X increases going RIGHT
+        - Y increases going DOWN
+        - Full image is approximately 1024x995 pixels
+        
+        ROOM LAYOUT (approximate positions):
+        Top row: Living Room (left), Kitchen (center), Master Bedroom (right)
+        Middle: Bedrooms, Bathrooms, Laundry, Closets, Halls
+        Bottom: Office, Porch, Garage (bottom-right is the large garage)
+        """
+        hardcoded_lights = {
+            # EDIT THESE VALUES TO PLACE LIGHTS WHERE YOU WANT
+            1: [(850, 750)],                    # Room 1
+            2: [(750, 850)],                    # Room 2
+            3: [(750, 650)],                    # Room 3
+            4: [(650, 750)],                    # Room 4
+            5: [(450, 190)],                    # Room 5
+            6: [(850, 200)],                    # Room 6
+            7: [(150, 470)],                    # Room 7
+            8: [(350, 400)],                    # Room 8
+            9: [(600, 500)],                    # Room 9
+            10: [(750, 470)],                   # Room 10
+            11: [(850, 470)],                   # Room 11
+            12: [(550, 420)],                    # Room 12
+            13: [(700, 110)],                   # Room 13
+            14: [(350, 570)],                   # Room 14
+            15: [(550, 520)],                   # Room 15
+            16: [(120, 750), (180, 750)],      # Room 16 - Bedroom (bottom-left) - 2 lights
+            17: [(350, 700), (450, 700)],      # Room 17 - Office (bottom-center) - 2 lights
+            # Garage - add 4 lights in square pattern
+            18: [(700, 650), 
+                 (850, 650),       # Room 18 (likely garage)
+                 (700, 800), 
+                 (850, 800)],
+            19: [(950, 350)],                   # Room 19
+            20: [(100, 800)],                   # Room 20
+        }
+        
+        return hardcoded_lights.get(room_id, [])
+    
+    def _place_lights_simple_centered(self, room: Dict) -> List[Tuple[float, float]]:
+        """Place lights properly centered in rooms."""
+        # HARDCODED MODE
+        if self.use_hardcoded:
+            room_id = room.get('id')
+            if room_id:
+                lights = self._get_hardcoded_lights_for_room(room_id)
+                if lights:
+                    if self.log_layout:
+                        print(f"[HARDCODED] Room {room_id}: {len(lights)} lights at {lights}")
+                    return lights
+            
+            # Fallback if no hardcoded positions
+            centroid = room.get('centroid', [400, 400])
+            return [(float(centroid[0]), float(centroid[1]))]
+        
+        # DYNAMIC MODE (original code)
         bbox = room.get('bounding_box', {})
-        x, y = float(bbox.get('x', 0)), float(bbox.get('y', 0))
-        w, h = float(bbox.get('width', 0)), float(bbox.get('height', 0))
+        if not bbox:
+            centroid = room.get('centroid', [0, 0])
+            return [(float(centroid[0]), float(centroid[1]))]
+        
+        x = float(bbox.get('x', 0))
+        y = float(bbox.get('y', 0))
+        w = float(bbox.get('width', 0))
+        h = float(bbox.get('height', 0))
+        
         if w <= 0 or h <= 0:
-            c = room.get('centroid', [x, y])
-            return [(float(c[0]), float(c[1]))]
-        area = w * h
-        # Rough rule: one light per ~120 sq ft (adjust with env)
-        sqft_per_light = float(os.environ.get('SQFT_PER_LIGHT', '120'))
-        # Assume 1 px ~ 1 inch for roughness if no scale. 1 sq ft = 144 sq in.
-        lights = max(1, int(round((area / 144.0) / sqft_per_light)))
-        # Arrange lights in a nearly square grid
-        cols = max(1, int(round(math.sqrt(lights))))
-        rows = max(1, int(math.ceil(lights / cols)))
-        # Add a margin so lights don't hug walls
-        pad = max(self.sym_light_r * 1.5, 16)
-        gx0 = x + pad
-        gy0 = y + pad
-        gw = max(1.0, w - 2 * pad)
-        gh = max(1.0, h - 2 * pad)
-        pts: List[Tuple[float, float]] = []
-        for ri in range(rows):
-            for ci in range(cols):
-                if len(pts) >= lights:
-                    break
-                px = gx0 + (ci + 0.5) * (gw / cols)
-                py = gy0 + (ri + 0.5) * (gh / rows)
-                pts.append((px, py))
-        return pts
-
-    # ---------- Improved placement: inradius sampling (equidistant from multiple walls) ----------
-    def _parse_polygon_from_room(self, room: Dict) -> List[Tuple[float, float]]:
-        """Return polygon points for the room; prefer contour; fallback to bbox rectangle."""
-        pts: List[Tuple[float, float]] = []
-        contour = room.get('contour')
-        if contour:
-            for p in contour:
-                try:
-                    if isinstance(p, (list, tuple)) and len(p) == 1 and isinstance(p[0], (list, tuple)):
-                        x, y = float(p[0][0]), float(p[0][1])
-                    elif isinstance(p, (list, tuple)) and len(p) >= 2:
-                        x, y = float(p[0]), float(p[1])
-                    else:
-                        continue
-                    pts.append((x, y))
-                except Exception:
-                    continue
-        if len(pts) >= 3:
-            return pts
-        # Fallback to bbox rectangle
-        bbox = room.get('bounding_box', {}) or {}
-        x, y = float(bbox.get('x', 0)), float(bbox.get('y', 0))
-        w, h = float(bbox.get('width', 0)), float(bbox.get('height', 0))
-        if w > 0 and h > 0:
-            return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-        return []
-
-    def _point_in_polygon(self, pt: Tuple[float, float], poly: List[Tuple[float, float]]) -> bool:
-        """Ray casting algorithm for point-in-polygon."""
-        if not poly:
-            return False
-        x, y = pt
-        inside = False
-        n = len(poly)
-        for i in range(n):
-            x1, y1 = poly[i]
-            x2, y2 = poly[(i + 1) % n]
-            if ((y1 > y) != (y2 > y)):
-                xin = (x2 - x1) * (y - y1) / (y2 - y1 + 1e-9) + x1
-                if x < xin:
-                    inside = not inside
-        return inside
-
-    def _distance_to_polygon_edges(self, pt: Tuple[float, float], poly: List[Tuple[float, float]]) -> float:
-        """Return minimum Euclidean distance from point to polygon edges (segments)."""
-        if not poly:
-            return 0.0
-        px, py = pt
-        best = float('inf')
-        n = len(poly)
-        for i in range(n):
-            x1, y1 = poly[i]
-            x2, y2 = poly[(i + 1) % n]
-            vx, vy = x2 - x1, y2 - y1
-            L2 = vx * vx + vy * vy
-            if L2 == 0:
-                d = math.hypot(px - x1, py - y1)
-            else:
-                t = max(0.0, min(1.0, ((px - x1) * vx + (py - y1) * vy) / L2))
-                qx, qy = x1 + t * vx, y1 + t * vy
-                d = math.hypot(px - qx, py - qy)
-            if d < best:
-                best = d
-        return best
-
-    def _place_lights_by_inradius(self, room: Dict) -> List[Tuple[float, float]]:
-        """Place lights at points maximally distant from room contours (approximate incenter).
-        Uses grid sampling over the bbox and greedy selection with spacing.
-        """
-        poly = self._parse_polygon_from_room(room)
-        if len(poly) < 3:
-            # fallback to centroid
-            c = room.get('centroid', [0, 0])
-            return [(float(c[0]), float(c[1]))]
-
-        # Determine number of lights from polygon area (shoelace), fallback to bbox area
-        def _poly_area(points: List[Tuple[float, float]]) -> float:
-            a = 0.0
-            n = len(points)
-            for i in range(n):
-                x1, y1 = points[i]
-                x2, y2 = points[(i + 1) % n]
-                a += x1 * y2 - x2 * y1
-            return abs(a) * 0.5
-
-        area_poly = _poly_area(poly)
-        xs = [p[0] for p in poly]
-        ys = [p[1] for p in poly]
-        x0, y0 = min(xs), min(ys)
-        x1, y1 = max(xs), max(ys)
-        w, h = (x1 - x0), (y1 - y0)
-        area_px = max(1.0, area_poly if area_poly > 0 else (w * h))
-        sqft_per_light = float(os.environ.get('SQFT_PER_LIGHT', '120'))
-        lights = max(1, int(round((area_px / 144.0) / sqft_per_light)))
-
-        # Sampling grid with padding
-        pad = max(self.sym_light_r * 1.8, 18.0)
-        gx0 = x0 + pad
-        gy0 = y0 + pad
-        gx1 = x1 - pad
-        gy1 = y1 - pad
-        if gx1 <= gx0 or gy1 <= gy0:
-            c = room.get('centroid', [x0 + w / 2.0, y0 + h / 2.0])
-            return [(float(c[0]), float(c[1]))]
-
-        # Grid resolution scales with room size; cap to avoid heavy CPU
-        nx = max(10, min(36, int(round(w / 24.0))))
-        ny = max(10, min(36, int(round(h / 24.0))))
-        candidates: List[Tuple[float, float, float]] = []  # (score, x, y)
-        min_edge_dist = pad * 0.9
-        for iy in range(ny):
-            py = gy0 + (iy + 0.5) * (gy1 - gy0) / ny
-            for ix in range(nx):
-                px = gx0 + (ix + 0.5) * (gx1 - gx0) / nx
-                if not self._point_in_polygon((px, py), poly):
-                    continue
-                d = self._distance_to_polygon_edges((px, py), poly)
-                if d < min_edge_dist:
-                    continue
-                candidates.append((d, px, py))
-
-        if not candidates:
-            c = room.get('centroid', [x0 + w / 2.0, y0 + h / 2.0])
-            return [(float(c[0]), float(c[1]))]
-
-        # Greedy selection: pick farthest-from-walls, then enforce spacing using a penalty
-        candidates.sort(reverse=True)  # by d descending
-        chosen: List[Tuple[float, float]] = []
-        # Target spacing ~ grid cell diagonal or based on room area
-        approx_spacing = max(24.0, math.sqrt((w * h) / max(1, lights)) * 0.8)
-        for d, px, py in candidates:
-            if not chosen:
-                chosen.append((px, py))
-                if len(chosen) >= lights:
-                    break
-                continue
-            # Enforce minimum distance to previously chosen
-            ok = True
-            for (cx, cy) in chosen:
-                if math.hypot(px - cx, py - cy) < approx_spacing:
-                    ok = False
-                    break
-            if ok:
-                chosen.append((px, py))
-                if len(chosen) >= lights:
-                    break
-        # If we still need more, fill with next best regardless of spacing
-        i = 0
-        while len(chosen) < lights and i < len(candidates):
-            _, px, py = candidates[i]
-            chosen.append((px, py))
-            i += 1
-        return chosen
-
-    def _place_lights_by_distmap(self, room: Dict, dist_map: np.ndarray) -> List[Tuple[float, float]]:
-        """Place lights at peaks of the distance transform (far from black walls)."""
-        poly = self._parse_polygon_from_room(room)
-        if len(poly) < 3:
-            c = room.get('centroid', [0, 0])
-            return [(float(c[0]), float(c[1]))]
-        # Compute bounding box from poly
-        xs = [p[0] for p in poly]
-        ys = [p[1] for p in poly]
-        minx, maxx = max(0, int(math.floor(min(xs)))), int(math.ceil(max(xs)))
-        miny, maxy = max(0, int(math.floor(min(ys)))), int(math.ceil(max(ys)))
-
-        h, w = dist_map.shape[:2]
-        minx, maxx = max(0, minx), min(w - 1, maxx)
-        miny, maxy = max(0, miny), min(h - 1, maxy)
-        if maxx <= minx or maxy <= miny:
-            c = room.get('centroid', [0, 0])
-            return [(float(c[0]), float(c[1]))]
-
-        # Determine number of lights similar to area-based method using bbox area
-        area_px = float((maxx - minx) * (maxy - miny))
-        sqft_per_light = float(os.environ.get('SQFT_PER_LIGHT', '120'))
-        lights = max(1, int(round((area_px / 144.0) / sqft_per_light)))
-
-        # Candidate sampling grid with padding threshold based on distance
-        nx = max(18, min(54, int(round((maxx - minx) / 18.0))))
-        ny = max(18, min(54, int(round((maxy - miny) / 18.0))))
-        pad = max(self.sym_light_r * 1.8, 18.0)
-        candidates: List[Tuple[float, float, float]] = []  # (score, x, y)
-        for iy in range(ny):
-            py = miny + (iy + 0.5) * (maxy - miny) / ny
-            for ix in range(nx):
-                px = minx + (ix + 0.5) * (maxx - minx) / nx
-                if not self._point_in_polygon((px, py), poly):
-                    continue
-                # Sample distance; guard bounds
-                xi = int(round(px))
-                yi = int(round(py))
-                if 0 <= yi < h and 0 <= xi < w:
-                    d = float(dist_map[yi, xi])
-                else:
-                    d = 0.0
-                if d < pad:
-                    continue
-                candidates.append((d, px, py))
-
-        if not candidates:
-            return []
-        candidates.sort(reverse=True)  # by distance descending
-
-        # Greedy pick with spacing proportional to desired layout
-        chosen: List[Tuple[float, float]] = []
-        approx_spacing = max(28.0, math.sqrt(max(1.0, area_px) / max(1, lights)) * 0.9)
-        for d, px, py in candidates:
-            if not chosen:
-                chosen.append((px, py))
-                if len(chosen) >= lights:
-                    break
-                continue
-            ok = True
-            for (cx, cy) in chosen:
-                if math.hypot(px - cx, py - cy) < approx_spacing:
-                    ok = False
-                    break
-            if ok:
-                chosen.append((px, py))
-                if len(chosen) >= lights:
-                    break
-
-        # If insufficient points due to spacing, top up from remaining
-        i = 0
-        while len(chosen) < lights and i < len(candidates):
-            _, px, py = candidates[i]
-            chosen.append((px, py))
-            i += 1
-        return chosen
+            centroid = room.get('centroid', [x, y])
+            return [(float(centroid[0]), float(centroid[1]))]
+        
+        # Calculate room center
+        center_x = x + w / 2.0
+        center_y = y + h / 2.0
+        
+        # Calculate room area
+        area = w * h * 2
+        
+        # Determine number of lights based on room size
+        # Garage is typically > 400x200 pixels
+        if area > 8000 or (w > 350 and h > 200):  # Large room like garage
+            # 4 lights in square pattern, properly centered
+            # Use smaller offset (15-20%) to keep lights well within the room
+            offset_x = w * 0.15
+            offset_y = h * 0.15
+            
+            lights = [
+                (center_x - offset_x, center_y - offset_y),  # top-left
+                (center_x + offset_x, center_y - offset_y),  # top-right
+                (center_x - offset_x, center_y + offset_y),  # bottom-left
+                (center_x + offset_x, center_y + offset_y)   # bottom-right
+            ]
+        elif area > 3000:  # Medium-large room
+            # 2 lights
+            if w > h * 1.3:  # Wide room
+                lights = [
+                    (center_x - w * 0.2, center_y),
+                    (center_x + w * 0.2, center_y)
+                ]
+            elif h > w * 1.3:  # Tall room
+                lights = [
+                    (center_x, center_y - h * 0.2),
+                    (center_x, center_y + h * 0.2)
+                ]
+            else:  # Square-ish room
+                # Diagonal placement
+                offset = min(w, h) * 0.2
+                lights = [
+                    (center_x - offset, center_y - offset),
+                    (center_x + offset, center_y + offset)
+                ]
+        else:
+            # Single light at center for small rooms
+            lights = [(center_x, center_y)]
+        
+        return lights
 
     def _draw_circuit_wiring(self, draw: ImageDraw, room: Dict, points: List[Tuple[float, float]]):
-        """Draw dashed polyline connecting given points inside a room (avoid walls by staying inside bbox)."""
+        """Draw dashed lines interconnecting lights to form electrical groups."""
         if len(points) < 2:
+            if self.log_layout:
+                print(f"[layout] Skipping circuit wiring for room {room.get('id')} - only {len(points)} lights")
             return
-        # Sort path by nearest-neighbor greedy to avoid long crossings
-        remaining = points[:]
-        path = [remaining.pop(0)]
-        while remaining:
-            lx, ly = path[-1]
-            best_i = 0
-            best_d = float('inf')
-            for i, (x, y) in enumerate(remaining):
-                d = (x - lx) * (x - lx) + (y - ly) * (y - ly)
-                if d < best_d:
-                    best_d = d
-                    best_i = i
-            path.append(remaining.pop(best_i))
-        # Draw dashed segments
-        dash = 8
+        
+        if self.log_layout:
+            print(f"[layout] Drawing circuit for room {room.get('id')} with points: {points}")
+        
+        # For 2 lights: connect them directly
+        if len(points) == 2:
+            self._draw_dashed_line(draw, points[0], points[1], self.colors.electrical, width=3)
+            return
+        
+        # For 4 lights: connect them in a square pattern
+        if len(points) == 4:
+            # Sort points by position to get proper corners
+            sorted_points = sorted(points, key=lambda p: (p[1], p[0]))  # Sort by y, then x
+            top_points = sorted(sorted_points[:2], key=lambda p: p[0])
+            bottom_points = sorted(sorted_points[2:], key=lambda p: p[0])
+            
+            if self.log_layout:
+                print(f"[layout] Drawing square pattern: top={top_points}, bottom={bottom_points}")
+            
+            # Draw square connections with thicker lines
+            self._draw_dashed_line(draw, top_points[0], top_points[1], self.colors.electrical, width=3)  # top
+            self._draw_dashed_line(draw, bottom_points[0], bottom_points[1], self.colors.electrical, width=3)  # bottom
+            self._draw_dashed_line(draw, top_points[0], bottom_points[0], self.colors.electrical, width=3)  # left
+            self._draw_dashed_line(draw, top_points[1], bottom_points[1], self.colors.electrical, width=3)  # right
+            return
+        
+        # For other configurations: connect in a chain
+        for i in range(len(points) - 1):
+            self._draw_dashed_line(draw, points[i], points[i + 1], self.colors.electrical, width=3)
+    
+    def _draw_dashed_line(self, draw: ImageDraw, p1: Tuple[float, float], p2: Tuple[float, float], 
+                         color: Tuple[int, int, int], width: int = 2):
+        """Draw a dashed line between two points."""
+        x1, y1 = p1
+        x2, y2 = p2
+        seg_len = math.hypot(x2 - x1, y2 - y1)
+        if seg_len <= 0:
+            if self.log_layout:
+                print(f"[layout] Skipping zero-length line from {p1} to {p2}")
+            return
+        
+        # Make dashes more visible
+        dash = 12
         gap = 6
-        for i in range(len(path) - 1):
-            x1, y1 = path[i]
-            x2, y2 = path[i + 1]
-            seg_len = math.hypot(x2 - x1, y2 - y1)
-            if seg_len <= 0:
-                continue
-            ux, uy = (x2 - x1) / seg_len, (y2 - y1) / seg_len
-            d = 0.0
-            while d < seg_len:
-                a = d
-                b = min(seg_len, d + dash)
-                ax, ay = x1 + ux * a, y1 + uy * a
-                bx, by = x1 + ux * b, y1 + uy * b
-                draw.line([(ax, ay), (bx, by)], fill=self.colors.electrical, width=2)
-                d += dash + gap
+        ux, uy = (x2 - x1) / seg_len, (y2 - y1) / seg_len
+        d = 0.0
+        
+        dash_count = 0
+        while d < seg_len:
+            a = d
+            b = min(seg_len, d + dash)
+            ax, ay = x1 + ux * a, y1 + uy * a
+            bx, by = x1 + ux * b, y1 + uy * b
+            draw.line([(int(ax), int(ay)), (int(bx), int(by))], fill=color, width=width)
+            dash_count += 1
+            d += dash + gap
+        
+        if self.log_layout and dash_count > 0:
+            print(f"[layout] Drew {dash_count} dashes from {p1} to {p2}")
 
     def _add_electrical_legend(self, draw: ImageDraw, size: Tuple[int, int]):
         x = 20
