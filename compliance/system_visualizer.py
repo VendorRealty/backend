@@ -937,6 +937,144 @@ class SystemVisualizer:
         draw.rectangle([legend_x, y-10, legend_x+20, y+10], outline=(80, 80, 80), width=2)
         draw.text((legend_x + 25, y - 6), "Air Handler", fill='black')
 
+    def generate_main_hvac_layout(self, background_image_path: str, equipment_location: List[int] = None, 
+                                 trunk_level: float = 0.55, include_legend: bool = True) -> Image.Image:
+        """
+        Generate a main HVAC layout with architectural styling for any floor plan.
+        
+        @param background_image_path: Path to the background floor plan image
+        @param equipment_location: [x_ratio, y_ratio] as fractions of image size (default: [0.85, 0.85] for bottom-right)
+        @param trunk_level: Vertical position of main trunk as fraction of image height (default: 0.55 for center)
+        @param include_legend: Whether to include the HVAC legend on the output image
+        @return: PIL Image with HVAC overlay drawn on the background
+        
+        @example:
+            visualizer = SystemVisualizer()
+            hvac_img = visualizer.generate_main_hvac_layout(
+                background_image_path="/path/to/floorplan.png",
+                equipment_location=[0.9, 0.8],  # Bottom-right corner
+                trunk_level=0.6,  # Slightly below center
+                include_legend=True
+            )
+            hvac_img.save("output_hvac.png")
+        """
+        # Load background image
+        try:
+            background = Image.open(background_image_path)
+        except Exception as e:
+            raise ValueError(f"Could not load background image: {e}")
+        
+        # Create overlay
+        img = background.convert('RGB').copy()
+        draw = ImageDraw.Draw(img)
+        img_width, img_height = background.size
+        
+        # Default equipment location if not provided
+        if equipment_location is None:
+            equipment_location = [0.85, 0.85]
+        
+        # Calculate actual positions
+        equipment_x = int(img_width * equipment_location[0])
+        equipment_y = int(img_height * equipment_location[1])
+        trunk_y = int(img_height * trunk_level)
+        
+        # HVAC colors
+        main_trunk_color = (120, 81, 169)  # Purple
+        supply_color = (100, 120, 200)     # Blue
+        return_color = (150, 100, 180)     # Light purple
+        
+        # Draw main trunk system
+        trunk_start_x = int(img_width * 0.75)
+        trunk_end_x = int(img_width * 0.15)
+        
+        self._draw_thick_duct(draw, [trunk_start_x, trunk_y], [trunk_end_x, trunk_y], main_trunk_color, 24)
+        self._draw_thick_duct(draw, [equipment_x, equipment_y], [trunk_start_x, trunk_y], main_trunk_color, 20)
+        
+        # Draw supply branches
+        self._draw_floorplan_specific_branches(draw, img_width, img_height, trunk_y, supply_color)
+        
+        # Draw return system
+        self._draw_floorplan_return_system(draw, img_width, img_height, equipment_x, equipment_y, return_color)
+        
+        # Draw equipment
+        self._draw_equipment_and_terminals(draw, equipment_x, equipment_y, img_width, img_height)
+        
+        # Add legend if requested
+        if include_legend:
+            self._add_hvac_legend(draw, img.size)
+        
+        return img
+
+    def generate_electrical_main_layout(self, background_image_path: str, floor_plan_data: Dict, 
+                                       compliance_issues: List, panel_location: List[int] = None,
+                                       use_hardcoded_positions: bool = False, include_legend: bool = True) -> Image.Image:
+        """
+        Generate a main electrical layout with proper device placement and circuit routing.
+        
+        @param background_image_path: Path to the background floor plan image
+        @param floor_plan_data: Dictionary containing room and wall data from floor plan analysis
+        @param compliance_issues: List of electrical compliance issues to address
+        @param panel_location: [x, y] pixel coordinates for electrical panel (default: auto-determined)
+        @param use_hardcoded_positions: Whether to use hardcoded light positions for specific floor plan
+        @param include_legend: Whether to include the electrical legend on the output image
+        @return: PIL Image with electrical overlay drawn on the background
+        
+        @example:
+            visualizer = SystemVisualizer()
+            electrical_img = visualizer.generate_electrical_main_layout(
+                background_image_path="/path/to/floorplan.png",
+                floor_plan_data=parsed_floor_data,
+                compliance_issues=electrical_issues,
+                panel_location=[100, 100],  # Top-left corner
+                use_hardcoded_positions=True,
+                include_legend=True
+            )
+            electrical_img.save("output_electrical.png")
+        """
+        # Load background image
+        try:
+            background = Image.open(background_image_path)
+        except Exception as e:
+            raise ValueError(f"Could not load background image: {e}")
+        
+        # Set hardcoded positions flag if requested
+        if use_hardcoded_positions:
+            original_use_backupd = self.use_backupd
+            self.use_backupd = True
+        
+        try:
+            # Create simple overlay instead of using the problematic method
+            img = background.convert('RGB').copy()
+            draw = ImageDraw.Draw(img)
+            
+            # Generate electrical elements manually
+            rooms = floor_plan_data.get('rooms', [])
+            
+            # Place lights in rooms
+            for room in rooms:
+                lights = self._place_lights_simple_centered(room)
+                for (x, y) in lights:
+                    r = self.sym_light_r
+                    draw.ellipse([x - r, y - r, x + r, y + r], outline=self.colors.electrical, width=2)
+                    draw.line([(x - r, y), (x + r, y)], fill=self.colors.electrical, width=1)
+                    draw.line([(x, y - r), (x, y + r)], fill=self.colors.electrical, width=1)
+            
+            # Draw electrical panel
+            if panel_location is None:
+                panel_location = self._determine_panel_location(floor_plan_data)
+            self._draw_electrical_panel(draw, panel_location)
+            
+            # Add legend if requested
+            if include_legend:
+                self._add_electrical_legend(draw, img.size)
+            
+            return img
+            
+        finally:
+            # Restore original setting
+            if use_hardcoded_positions:
+                self.use_backupd = original_use_backupd
+
     def test_architectural_hvac_on_floorplan(self, floor_plan_data: Dict) -> Image.Image:
         """
         Test function to generate the new architectural HVAC layout on the specific floorplan.png
@@ -977,41 +1115,6 @@ class SystemVisualizer:
         
         return hvac_image
 
-def main():
-    """
-    Main function to generate HVAC layout for floorplan.png
-    Run this file directly to generate the HVAC overlay
-    """
-    print("🏠 Generating HVAC layout for floorplan.png...")
-    
-    visualizer = SystemVisualizer()
-    
-    try:
-        hvac_image = visualizer.generate_hvac_for_floorplan()
-        output_filename = 'floorplan_hvac.png'
-        hvac_image.save(output_filename)
-        
-        print("✅ SUCCESS! HVAC layout generated!")
-        print(f"📁 Saved as: {output_filename}")
-        print(f"📐 Image size: {hvac_image.size}")
-        print("🎯 The HVAC system includes:")
-        print("   • Main trunk line through central hallway")
-        print("   • Supply branches to all rooms")
-        print("   • Return air system")
-        print("   • Air handler in garage")
-        print("   • Proper architectural styling")
-        
-        return hvac_image
-        
-    except Exception as ex:
-        print(f"❌ Error generating HVAC layout: {ex}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-if __name__ == "__main__":
-    main()
-    
     def generate_plumbing_layout(self, floor_plan_data: Dict, compliance_issues: List, background: Image.Image) -> Image.Image:
         """Generate plumbing system overlay with supply and drainage over original floor plan."""
         rooms = floor_plan_data.get('rooms', [])
@@ -1421,8 +1524,6 @@ if __name__ == "__main__":
         nx, ny = best_norm
         return (int(round(px + nx * offset)), int(round(py + ny * offset)))
 
-    # REMOVED - No longer needed since backupd mode just uses centroids
-    
     def _get_backupd_lights_for_room(self, room_id: int) -> List[Tuple[float, float]]:
         """
         backupD LIGHT POSITIONS FOR EACH ROOM
@@ -1439,7 +1540,6 @@ if __name__ == "__main__":
         Bottom: Office, Porch, Garage (bottom-right is the large garage)
         """
         backupd_lights = {
-            # EDIT THESE VALUES TO PLACE LIGHTS WHERE YOU WANT
             1: [(850, 750)],                    # Room 1
             2: [(750, 850)],                    # Room 2
             3: [(750, 650)],                    # Room 3

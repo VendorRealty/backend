@@ -918,37 +918,124 @@ async def get_electrical_legend_endpoint():
         return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
 
 
-@app.post("/api/legend/electrical")
-async def get_electrical_legend_post_endpoint():
-    """POST alias for clients that always POST images; returns the legend PNG without needing an upload."""
-    return await get_electrical_legend_endpoint()
-
-
 @app.post("/api/layout/hvac")
 async def generate_hvac_layout_endpoint(
     image: UploadFile = File(..., description="Floor plan image (PNG only)")
 ):
+    """
+    Generate HVAC layout overlay for a floor plan image.
+    Returns PNG image with architectural-style HVAC ductwork, equipment, and terminals.
+    """
     contents = await image.read()
     try:
-        floor_plan_data, compliance_issues, routing_suggestions, background = _prepare_floor_plan_data(contents)
-        hvac_img = system_visualizer.generate_hvac_layout(floor_plan_data, compliance_issues, routing_suggestions, background)
+        # Save uploaded image temporarily
+        temp_path = "temp_floorplan.png"
+        with open(temp_path, "wb") as f:
+            f.write(contents)
+        
+        # Generate HVAC layout using the new main function
+        hvac_img = system_visualizer.generate_main_hvac_layout(
+            background_image_path=temp_path,
+            equipment_location=[0.85, 0.85],  # Bottom-right (garage area)
+            trunk_level=0.55,  # Central hallway level
+            include_legend=True
+        )
+        
+        # Clean up temp file
+        os.remove(temp_path)
+        
+        # Return image
         buf = BytesIO()
         hvac_img.save(buf, format="PNG")
         headers = {"Content-Disposition": 'attachment; filename="hvac.png"'}
         return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+        
     except Exception as e:
+        # Clean up temp file if it exists
+        if os.path.exists("temp_floorplan.png"):
+            os.remove("temp_floorplan.png")
+            
+        # Fallback: return original image with error overlay
         try:
             bg = Image.open(BytesIO(contents)).convert("RGB")
             bg = _downsample(bg, 1024)
         except Exception:
             bg = Image.new("RGB", (1024, 768), "white")
         draw = ImageDraw.Draw(bg)
-        draw.rectangle([(10, 10), (bg.width - 10, bg.height - 10)], outline=(0, 0, 255), width=6)
-        draw.text((20, 20), f"HVAC overlay error: {e}", fill=(0, 0, 255))
+        draw.rectangle([(10, 10), (bg.width - 10, bg.height - 10)], outline=(255, 0, 0), width=6)
+        draw.text((20, 20), f"HVAC overlay error: {e}", fill=(255, 0, 0))
         buf = BytesIO()
         bg.save(buf, format="PNG")
         headers = {"Content-Disposition": 'attachment; filename="hvac.png"'}
         return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+
+
+@app.get("/api/legend/hvac")
+async def get_hvac_legend_endpoint():
+    """
+    Generate and return HVAC legend image showing symbols and their meanings.
+    """
+    try:
+        # Create clean legend image
+        legend_img = Image.new("RGB", (200, 200), "white")
+        draw = ImageDraw.Draw(legend_img)
+        
+        # Add HVAC legend
+        draw.text((10, 10), "HVAC LEGEND:", fill='black')
+        y = 30
+        
+        # Supply duct
+        draw.line([(10, y), (40, y)], fill=(100, 150, 255), width=12)
+        draw.text((45, y - 6), "Supply Duct", fill='black')
+        y += 25
+        
+        # Return duct
+        draw.line([(10, y), (40, y)], fill=(150, 100, 200), width=16)
+        draw.text((45, y - 6), "Return Duct", fill='black')
+        y += 25
+        
+        # Main trunk
+        draw.line([(10, y), (40, y)], fill=(120, 81, 169), width=20)
+        draw.text((45, y - 6), "Main Trunk", fill='black')
+        y += 30
+        
+        # Supply diffuser
+        draw.rectangle([10, y-8, 26, y+8], outline=(100, 150, 255), width=2)
+        draw.text((30, y - 6), "Supply Diffuser", fill='black')
+        y += 25
+        
+        # Return grille
+        draw.rectangle([10, y-8, 26, y+8], outline=(150, 100, 200), width=2)
+        draw.text((30, y - 6), "Return Grille", fill='black')
+        y += 25
+        
+        # Equipment
+        draw.rectangle([10, y-10, 30, y+10], outline=(80, 80, 80), width=2)
+        draw.text((35, y - 6), "Air Handler", fill='black')
+        
+        buf = BytesIO()
+        legend_img.save(buf, format="PNG")
+        headers = {"Content-Disposition": 'attachment; filename="hvac_legend.png"'}
+        return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+        
+    except Exception as e:
+        # Minimal error image response
+        bg = Image.new("RGB", (200, 200), "white")
+        draw = ImageDraw.Draw(bg)
+        draw.rectangle([(5, 5), (195, 195)], outline=(0, 0, 0), width=2)
+        draw.text((10, 10), "HVAC Legend", fill=(0, 0, 0))
+        draw.text((10, 30), f"Error: {str(e)[:20]}...", fill=(255, 0, 0))
+        buf = BytesIO()
+        bg.save(buf, format="PNG")
+        headers = {"Content-Disposition": 'attachment; filename="hvac_legend.png"'}
+        return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+
+
+@app.post("/api/legend/electrical")
+async def get_electrical_legend_post_endpoint():
+    """POST alias for clients that always POST images; returns the legend PNG without needing an upload."""
+    return await get_electrical_legend_endpoint()
+
 
 
 @app.post("/api/debug/cerebras")
