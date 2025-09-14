@@ -32,8 +32,8 @@ class SystemVisualizer:
         self.wall_offset = float(os.environ.get("SYM_WALL_OFFSET", "12"))  # push symbols inward
         # Verbose logging toggle
         self.log_layout = os.environ.get("LOG_LAYOUT", "0") == "1"
-        # Use hardcoded positions for specific floorplan
-        self.use_hardcoded = os.environ.get("USE_HARDCODED_LIGHTS", "0") == "1"
+        # Use backupd positions for specific floorplan
+        self.use_backupd = os.environ.get("USE_backupD_LIGHTS", "0") == "1"
         
     def generate_electrical_layout(self, floor_plan_data: Dict, compliance_issues: List, background: Image.Image) -> Image.Image:
         """Generate electrical system overlay based on compliance requirements over the original floor plan."""
@@ -645,11 +645,11 @@ class SystemVisualizer:
         nx, ny = best_norm
         return (int(round(px + nx * offset)), int(round(py + ny * offset)))
 
-    # REMOVED - No longer needed since hardcoded mode just uses centroids
+    # REMOVED - No longer needed since backupd mode just uses centroids
     
-    def _get_hardcoded_lights_for_room(self, room_id: int) -> List[Tuple[float, float]]:
+    def _get_backupd_lights_for_room(self, room_id: int) -> List[Tuple[float, float]]:
         """
-        HARDCODED LIGHT POSITIONS FOR EACH ROOM
+        backupD LIGHT POSITIONS FOR EACH ROOM
         
         COORDINATE SYSTEM:
         - Origin (0,0) is at TOP-LEFT corner of the image
@@ -662,7 +662,7 @@ class SystemVisualizer:
         Middle: Bedrooms, Bathrooms, Laundry, Closets, Halls
         Bottom: Office, Porch, Garage (bottom-right is the large garage)
         """
-        hardcoded_lights = {
+        backupd_lights = {
             # EDIT THESE VALUES TO PLACE LIGHTS WHERE YOU WANT
             1: [(850, 750)],                    # Room 1
             2: [(750, 850)],                    # Room 2
@@ -690,21 +690,25 @@ class SystemVisualizer:
             20: [(100, 800)],                   # Room 20
         }
         
-        return hardcoded_lights.get(room_id, [])
+        return backupd_lights.get(room_id, [])
     
     def _place_lights_simple_centered(self, room: Dict) -> List[Tuple[float, float]]:
         """Place lights properly centered in rooms."""
-        # HARDCODED MODE
-        if self.use_hardcoded:
+        # backupD MODE
+        if self.use_backupd:
             room_id = room.get('id')
+            bbox = room.get('bounding_box', {})
+            # Always log to help identify which room is which
+            print(f"[ROOM MAPPING] Room {room_id}: bbox x={bbox.get('x', 0):.0f}, y={bbox.get('y', 0):.0f}, w={bbox.get('width', 0):.0f}, h={bbox.get('height', 0):.0f}")
+            
             if room_id:
-                lights = self._get_hardcoded_lights_for_room(room_id)
+                lights = self._get_backupd_lights_for_room(room_id)
                 if lights:
                     if self.log_layout:
-                        print(f"[HARDCODED] Room {room_id}: {len(lights)} lights at {lights}")
+                        print(f"[backupD] Room {room_id}: {len(lights)} lights at {lights}")
                     return lights
             
-            # Fallback if no hardcoded positions
+            # Fallback if no backupd positions
             centroid = room.get('centroid', [400, 400])
             return [(float(centroid[0]), float(centroid[1]))]
         
