@@ -6,26 +6,74 @@ import numpy as np
 import trimesh
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from pydantic import BaseModel
 from PIL import Image, ImageFilter, ImageOps, ImageDraw
 import cv2
 import easyocr
+import zipfile
 
-# Import compliance engine
+# Import compliance engine and system visualizer
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from compliance.compliance_engine import OntarioBuildingCodeEngine
+from compliance.system_visualizer import SystemVisualizer
+from compliance.electrical_detection import detect_electrical_symbols
 
 origins = [
     "*"
 ]
 
+def _load_env_early():
+    """Load environment variables from a .env file if present (no external deps required).
+    We do this before constructing singletons that read env at import time.
+    """
+    # Try python-dotenv if available
+    try:
+        from dotenv import load_dotenv  # type: ignore
+        # Load .env from repo root
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env_path = os.path.join(root_dir, ".env")
+        if os.path.exists(env_path):
+            load_dotenv(env_path)
+        else:
+            # Also try current working directory as a fallback
+            load_dotenv()
+        return
+    except Exception:
+        pass
+
+    # Minimal fallback loader (KEY=VALUE, ignores comments and quotes)
+    try:
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for candidate in (os.path.join(root_dir, ".env"), os.path.join(os.getcwd(), ".env")):
+            if not os.path.exists(candidate):
+                continue
+            with open(candidate, "r", encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if not s or s.startswith("#"):
+                        continue
+                    if "=" not in s:
+                        continue
+                    k, v = s.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+    except Exception:
+        # Best-effort only
+        pass
+
+
+_load_env_early()
+
 app = FastAPI(title="CAD Processing & Compliance API", version="0.2.0")
 
-# Initialize compliance engine
+# Initialize compliance engine and system visualizer
 compliance_engine = OntarioBuildingCodeEngine()
+system_visualizer = SystemVisualizer()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -51,9 +99,12 @@ DEFAULT_BASE_THICKNESS_MM = 1.0
 
 # Initialize EasyOCR reader once (global to avoid repeated initialization)
 _ocr_reader = None
+OCR_ENABLED = bool(int(os.environ.get("OCR_ENABLED", "0")))
 
 def _get_ocr_reader():
     global _ocr_reader
+    if not OCR_ENABLED:
+        return None
     if _ocr_reader is None:
         _ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
     return _ocr_reader
@@ -67,12 +118,16 @@ def _remove_text_with_ocr(image: Image.Image, mask: np.ndarray) -> np.ndarray:
     Returns:
         mask with text regions removed
     """
+    if not OCR_ENABLED:
+        return mask
     try:
         # Convert PIL image to numpy array for OCR
         img_array = np.array(image)
         
         # Get OCR reader
         reader = _get_ocr_reader()
+        if reader is None:
+            return mask
         
         # Detect text (returns list of [bbox, text, confidence])
         results = reader.readtext(img_array, paragraph=False)
@@ -507,34 +562,47 @@ async def root():
 
 
 def detect_room_boundaries_from_image(processed_mask: np.ndarray) -> List[Dict]:
-    """Extract room boundaries from processed floor plan image"""
-    # Find contours for room boundaries
-    contours, _ = cv2.findContours(
-        processed_mask.astype(np.uint8), 
-        cv2.RETR_EXTERNAL, 
+    """Extract room boundaries from processed floor plan image.
+    Uses CCOMP to capture both the building outline and internal room contours.
+    """
+    mask_u8 = processed_mask.astype(np.uint8)
+    # Find contours including holes and internal boundaries
+    contours, hierarchy = cv2.findContours(
+        mask_u8,
+        cv2.RETR_CCOMP,
         cv2.CHAIN_APPROX_SIMPLE
     )
-    
-    rooms = []
-    for i, contour in enumerate(contours):
-        area = cv2.contourArea(contour)
-        if area < 1000:  # Skip very small areas
+
+    rooms: List[Dict] = []
+    if contours is None or len(contours) == 0:
+        return rooms
+
+    # Filter by area and exclude extremely large outline if present
+    areas = [cv2.contourArea(c) for c in contours]
+    max_area = max(areas) if areas else 0
+    room_id = 1
+    for contour, area in zip(contours, areas):
+        if area < 800:  # Skip tiny noise
             continue
-            
-        # Calculate bounding box and room properties
+        # Heuristic: ignore single largest outer boundary when it's far larger than others
+        if max_area > 0 and area > 0.6 * max_area:
+            # treat as building outline, skip as a "room"
+            continue
+
         x, y, w, h = cv2.boundingRect(contour)
         M = cv2.moments(contour)
-        cx = int(M['m10'] / M['m00']) if M['m00'] != 0 else x + w // 2
-        cy = int(M['m01'] / M['m00']) if M['m00'] != 0 else y + h // 2
-        
+        cx = int(M['m10'] / (M['m00'] + 1e-9)) if M['m00'] != 0 else x + w // 2
+        cy = int(M['m01'] / (M['m00'] + 1e-9)) if M['m00'] != 0 else y + h // 2
+
         rooms.append({
-            "id": i + 1,
+            "id": room_id,
             "area_pixels": float(area),
             "bounding_box": {"x": int(x), "y": int(y), "width": int(w), "height": int(h)},
-            "centroid": [cx, cy],
+            "centroid": [int(cx), int(cy)],
             "contour": contour.tolist()
         })
-    
+        room_id += 1
+
     return rooms
 
 
@@ -560,6 +628,24 @@ def extract_walls_from_image(processed_mask: np.ndarray) -> List[Dict]:
             })
     
     return walls
+
+
+def extract_edge_points_from_mask(processed_mask: np.ndarray, stride: int = 8, max_points: int = 5000) -> List[List[int]]:
+    """Sample edge points along detected contours/edges for routing.
+    Returns a list of [x, y] pixel coordinates subsampled to keep the graph small.
+    """
+    edges = cv2.Canny(processed_mask.astype(np.uint8), 50, 150)
+    ys, xs = np.where(edges > 0)
+    if xs.size == 0:
+        return []
+    # Subsample using stride and clamp count
+    pts = np.column_stack((xs, ys))
+    if stride > 1:
+        pts = pts[::max(1, int(stride))]
+    if len(pts) > max_points:
+        idx = np.linspace(0, len(pts) - 1, max_points, dtype=int)
+        pts = pts[idx]
+    return [[int(x), int(y)] for x, y in pts]
 
 
 def generate_intelligent_openings(walls: List[Dict], rooms: List[Dict]) -> List[Dict]:
@@ -621,6 +707,57 @@ def generate_intelligent_openings(walls: List[Dict], rooms: List[Dict]) -> List[
             })
     
     return openings
+
+
+def _prepare_floor_plan_data(contents: bytes) -> tuple[Dict, List, Dict, Image.Image]:
+    """Process the uploaded PNG into floor_plan_data and compliance outputs."""
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large. Max {MAX_UPLOAD_BYTES // (1024*1024)} MB")
+
+    # Load and process floor plan; background must match detection coordinates
+    img = _load_png_as_grayscale(contents)
+    img = _downsample(img, 1024)
+    # Downsample original color image to the same size for overlay background
+    original_color = Image.open(BytesIO(contents)).convert("RGB")
+    original_color = _downsample(original_color, 1024)
+    background = original_color
+
+    processed_mask = _preprocess_to_heightmap(
+        img_gray=img,
+        invert=True,
+        binary=True,
+        smooth_radius=0.25,
+        open_size=2,
+        close_size=3,
+        dilate_size=1,
+        median_size=3,
+        keep_largest=150,
+        min_area_ratio=0.00003,
+    )
+
+    # Detect architectural elements
+    rooms = detect_room_boundaries_from_image(processed_mask)
+    walls = extract_walls_from_image(processed_mask)
+    edge_points = extract_edge_points_from_mask(processed_mask, stride=8, max_points=4000)
+    openings = generate_intelligent_openings(walls, rooms)
+    electrical_devices = detect_electrical_symbols(background, processed_mask)
+
+    floor_plan_data = {
+        "rooms": rooms,
+        "walls": walls,
+        "edge_points": edge_points,
+        "openings": openings,
+        "electrical": electrical_devices,
+        "metadata": {
+            "processed_via": "_prepare_floor_plan_data",
+        },
+    }
+
+    # Get compliance requirements
+    compliance_issues = compliance_engine.check_compliance(floor_plan_data)
+    routing_suggestions = compliance_engine.generate_compliance_suggestions(floor_plan_data)
+
+    return floor_plan_data, compliance_issues, routing_suggestions, background
 
 
 @app.post("/api/process_floorplan")
@@ -725,6 +862,214 @@ async def process_floorplan_endpoint(
     return response
 
 
+@app.post("/api/layout/electrical")
+async def generate_electrical_layout_endpoint(
+    image: UploadFile = File(..., description="Floor plan image (PNG only)")
+):
+    contents = await image.read()
+    try:
+        floor_plan_data, compliance_issues, _, background = _prepare_floor_plan_data(contents)
+        electrical_img = system_visualizer.generate_electrical_layout(floor_plan_data, compliance_issues, background)
+        buf = BytesIO()
+        electrical_img.save(buf, format="PNG")
+        headers = {"Content-Disposition": 'attachment; filename="electrical.png"'}
+        return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+    except Exception as e:
+        # Fallback: return original (downsampled) with error marker
+        try:
+            bg = Image.open(BytesIO(contents)).convert("RGB")
+            bg = _downsample(bg, 1024)
+        except Exception:
+            bg = Image.new("RGB", (1024, 768), "white")
+        draw = ImageDraw.Draw(bg)
+        draw.rectangle([(10, 10), (bg.width - 10, bg.height - 10)], outline=(255, 0, 0), width=6)
+        draw.text((20, 20), f"Electrical overlay error: {e}", fill=(255, 0, 0))
+        buf = BytesIO()
+        bg.save(buf, format="PNG")
+        headers = {"Content-Disposition": 'attachment; filename="electrical.png"'}
+        return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+
+
+@app.get("/api/legend/electrical")
+async def get_electrical_legend_endpoint():
+    """Serve a static legend PNG if present; fallback to generated legend if missing."""
+    try:
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        default_path = os.path.join(root_dir, "static", "electrical_legend.png")
+        legend_path = os.environ.get("ELECTRICAL_LEGEND_PATH", default_path)
+        if os.path.exists(legend_path):
+            # Serve the user-provided static image
+            return FileResponse(legend_path, media_type="image/png", filename="electrical_legend.png")
+        # Fallback: auto-generated legend (until the static file is provided)
+        legend_img = system_visualizer.generate_electrical_legend_image()
+        buf = BytesIO()
+        legend_img.save(buf, format="PNG")
+        headers = {"Content-Disposition": 'attachment; filename="electrical_legend.png"'}
+        return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+    except Exception as e:
+        # Minimal error image response
+        bg = Image.new("RGB", (360, 220), "white")
+        draw = ImageDraw.Draw(bg)
+        draw.rectangle([(10, 10), (bg.width - 10, bg.height - 10)], outline=(0, 0, 0), width=2)
+        draw.text((20, 20), f"Legend error: {e}", fill=(0, 0, 0))
+        buf = BytesIO()
+        bg.save(buf, format="PNG")
+        headers = {"Content-Disposition": 'attachment; filename="electrical_legend.png"'}
+        return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+
+
+@app.post("/api/legend/electrical")
+async def get_electrical_legend_post_endpoint():
+    """POST alias for clients that always POST images; returns the legend PNG without needing an upload."""
+    return await get_electrical_legend_endpoint()
+
+
+@app.post("/api/layout/hvac")
+async def generate_hvac_layout_endpoint(
+    image: UploadFile = File(..., description="Floor plan image (PNG only)")
+):
+    contents = await image.read()
+    try:
+        floor_plan_data, compliance_issues, routing_suggestions, background = _prepare_floor_plan_data(contents)
+        hvac_img = system_visualizer.generate_hvac_layout(floor_plan_data, compliance_issues, routing_suggestions, background)
+        buf = BytesIO()
+        hvac_img.save(buf, format="PNG")
+        headers = {"Content-Disposition": 'attachment; filename="hvac.png"'}
+        return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+    except Exception as e:
+        try:
+            bg = Image.open(BytesIO(contents)).convert("RGB")
+            bg = _downsample(bg, 1024)
+        except Exception:
+            bg = Image.new("RGB", (1024, 768), "white")
+        draw = ImageDraw.Draw(bg)
+        draw.rectangle([(10, 10), (bg.width - 10, bg.height - 10)], outline=(0, 0, 255), width=6)
+        draw.text((20, 20), f"HVAC overlay error: {e}", fill=(0, 0, 255))
+        buf = BytesIO()
+        bg.save(buf, format="PNG")
+        headers = {"Content-Disposition": 'attachment; filename="hvac.png"'}
+        return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+
+
+@app.post("/api/debug/cerebras")
+async def debug_cerebras_endpoint(
+    image: UploadFile = File(..., description="Floor plan image (PNG only)")
+):
+    """Return JSON with Cerebras flags and refined counts per room, to verify usage."""
+    contents = await image.read()
+    try:
+        floor_plan_data, compliance_issues, _, _ = _prepare_floor_plan_data(contents)
+        summary = system_visualizer.debug_cerebras_layout(floor_plan_data, compliance_issues)
+        import json as _json
+        payload = _json.dumps(summary).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        return Response(content=payload, media_type="application/json", headers=headers)
+    except Exception as e:
+        import json as _json
+        payload = _json.dumps({"error": str(e)}).encode("utf-8")
+        return Response(content=payload, media_type="application/json", status_code=500)
+
+
+@app.get("/api/debug/cerebras")
+async def debug_cerebras_flags_endpoint():
+    """Return Cerebras configuration flags only (no image)."""
+    import json as _json
+    try:
+        summary = {
+            "use_cerebras": os.environ.get('USE_CEREBRAS_LAYOUT', '0') == '1',
+            "api_key_present": bool(os.environ.get('CEREBRAS_API_KEY')),
+            "model": os.environ.get('CEREBRAS_MODEL'),
+            "url": os.environ.get('CEREBRAS_API_URL'),
+            "log_layout": os.environ.get('LOG_LAYOUT'),
+        }
+        payload = _json.dumps(summary).encode("utf-8")
+        return Response(content=payload, media_type="application/json")
+    except Exception as e:
+        payload = _json.dumps({"error": str(e)}).encode("utf-8")
+        return Response(content=payload, media_type="application/json", status_code=500)
+
+
+@app.get("/api/debug/routes")
+async def list_routes():
+    """List registered routes for this FastAPI app to verify availability."""
+    import json as _json
+    try:
+        info = []
+        for r in app.router.routes:
+            try:
+                info.append({
+                    "path": getattr(r, 'path', None),
+                    "methods": list(getattr(r, 'methods', []) or []),
+                    "name": getattr(r, 'name', None),
+                })
+            except Exception:
+                continue
+        payload = _json.dumps({"routes": info}).encode("utf-8")
+        return Response(content=payload, media_type="application/json")
+    except Exception as e:
+        payload = _json.dumps({"error": str(e)}).encode("utf-8")
+        return Response(content=payload, media_type="application/json", status_code=500)
+
+
+@app.post("/api/layout/plumbing")
+async def generate_plumbing_layout_endpoint(
+    image: UploadFile = File(..., description="Floor plan image (PNG only)")
+):
+    contents = await image.read()
+    try:
+        floor_plan_data, compliance_issues, _, background = _prepare_floor_plan_data(contents)
+        plumbing_img = system_visualizer.generate_plumbing_layout(floor_plan_data, compliance_issues, background)
+        buf = BytesIO()
+        plumbing_img.save(buf, format="PNG")
+        headers = {"Content-Disposition": 'attachment; filename="plumbing.png"'}
+        return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+    except Exception as e:
+        try:
+            bg = Image.open(BytesIO(contents)).convert("RGB")
+            bg = _downsample(bg, 1024)
+        except Exception:
+            bg = Image.new("RGB", (1024, 768), "white")
+        draw = ImageDraw.Draw(bg)
+        draw.rectangle([(10, 10), (bg.width - 10, bg.height - 10)], outline=(139, 69, 19), width=6)
+        draw.text((20, 20), f"Plumbing overlay error: {e}", fill=(139, 69, 19))
+        buf = BytesIO()
+        bg.save(buf, format="PNG")
+        headers = {"Content-Disposition": 'attachment; filename="plumbing.png"'}
+        return Response(content=buf.getvalue(), media_type="image/png", headers=headers)
+
+
+@app.post("/api/generate_system_layouts_zip")
+async def generate_system_layouts_zip_endpoint(
+    image: UploadFile = File(..., description="Floor plan image (PNG only)")
+):
+    """Return a ZIP archive containing electrical.png, hvac.png, and plumbing.png."""
+    contents = await image.read()
+    floor_plan_data, compliance_issues, routing_suggestions, background = _prepare_floor_plan_data(contents)
+
+    # Generate images
+    electrical_img = system_visualizer.generate_electrical_layout(floor_plan_data, compliance_issues, background)
+    hvac_img = system_visualizer.generate_hvac_layout(floor_plan_data, compliance_issues, routing_suggestions, background)
+    plumbing_img = system_visualizer.generate_plumbing_layout(floor_plan_data, compliance_issues, background)
+
+    # Write to ZIP in-memory
+    zip_buf = BytesIO()
+    with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        b = BytesIO()
+        electrical_img.save(b, format="PNG")
+        zf.writestr("electrical.png", b.getvalue())
+
+        b = BytesIO()
+        hvac_img.save(b, format="PNG")
+        zf.writestr("hvac.png", b.getvalue())
+
+        b = BytesIO()
+        plumbing_img.save(b, format="PNG")
+        zf.writestr("plumbing.png", b.getvalue())
+
+    headers = {"Content-Disposition": 'attachment; filename="systems.zip"'}
+    return Response(content=zip_buf.getvalue(), media_type="application/zip", headers=headers)
+
+
 class ComplianceCheckRequest(BaseModel):
     floor_plan_data: Dict
     system_type: Optional[str] = None
@@ -769,4 +1114,69 @@ async def check_compliance_endpoint(request: ComplianceCheckRequest):
         
     except Exception as e:
         raise HTTPException(500, f"Compliance check failed: {e}")
+
+
+@app.post("/api/generate_system_layouts")
+async def generate_system_layouts_endpoint(
+    image: UploadFile = File(..., description="Floor plan image"),
+    systems: str = Form("all", description="Systems to generate: all, electrical, hvac, plumbing")
+):
+    """
+    Generate system layout visualizations based on floor plan and compliance requirements
+    Returns base64-encoded images of system overlays
+    """
+    import base64
+    
+    contents = await image.read()
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large. Max {MAX_UPLOAD_BYTES // (1024*1024)} MB")
+    
+    # Prepare analysis and background aligned with detection coordinates
+    floor_plan_data, compliance_issues, routing_suggestions, background = _prepare_floor_plan_data(contents)
+    
+    response = {}
+    
+    # Generate requested system layouts
+    if systems == "all" or "electrical" in systems:
+        electrical_img = system_visualizer.generate_electrical_layout(floor_plan_data, compliance_issues, background)
+        buffer = BytesIO()
+        electrical_img.save(buffer, format='PNG')
+        response["electrical_layout"] = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    
+    if systems == "all" or "hvac" in systems:
+        hvac_img = system_visualizer.generate_hvac_layout(floor_plan_data, compliance_issues, routing_suggestions, background)
+        buffer = BytesIO()
+        hvac_img.save(buffer, format='PNG')
+        response["hvac_layout"] = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    
+    if systems == "all" or "plumbing" in systems:
+        plumbing_img = system_visualizer.generate_plumbing_layout(floor_plan_data, compliance_issues, background)
+        buffer = BytesIO()
+        plumbing_img.save(buffer, format='PNG')
+        response["plumbing_layout"] = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    
+    # Generate combined view if all systems requested
+    if systems == "all":
+        combined_img = system_visualizer.generate_combined_systems(floor_plan_data, compliance_issues, routing_suggestions, background)
+        buffer = BytesIO()
+        combined_img.save(buffer, format='PNG')
+        response["combined_layout"] = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    
+    # Include compliance summary
+    response["compliance_summary"] = {
+        "total_issues": len(compliance_issues),
+        "errors": sum(1 for i in compliance_issues if i.severity == "error"),
+        "warnings": sum(1 for i in compliance_issues if i.severity == "warning"),
+        "info": sum(1 for i in compliance_issues if i.severity == "info")
+    }
+    
+    response["metadata"] = {
+        "filename": image.filename,
+        "systems_generated": systems,
+        "rooms_detected": len(floor_plan_data.get("rooms", [])),
+        "walls_detected": len(floor_plan_data.get("walls", [])),
+        "openings_generated": len(floor_plan_data.get("openings", []))
+    }
+    
+    return response
 

@@ -17,6 +17,7 @@ opencv-python-headless>=4.8,<5
 shapely>=2.0,<3
 mapbox_earcut>=1.0,<2
 easyocr>=1.7,<2
+requests>=2.31,<3
 
 # Compliance and CAD processing (optional, install as needed)
 # openai>=1.0.0,<2.0.0  # For AI-powered compliance suggestions
