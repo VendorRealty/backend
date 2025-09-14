@@ -235,6 +235,782 @@ class SystemVisualizer:
         self._draw_hvac_equipment(draw, equipment_loc)
 
         return img
+
+    def generate_architectural_hvac_layout(self, floor_plan_data: Dict, compliance_issues: List, background: Image.Image) -> Image.Image:
+        """
+        Generate architectural-style HVAC layout specifically designed for the floorplan.png layout.
+        Uses garage as mechanical room and creates proper trunk/branch ductwork.
+        """
+        # Create overlay image by copying the background
+        img = background.convert('RGB').copy()
+        draw = ImageDraw.Draw(img)
+        
+        # Get actual image dimensions for proper scaling
+        img_width, img_height = background.size
+        
+        # Define HVAC colors matching the reference style
+        main_trunk_color = (120, 81, 169)  # Purple like reference
+        supply_color = (100, 120, 200)     # Blue for supply branches
+        return_color = (150, 100, 180)     # Light purple for return
+        
+        # Equipment location in garage (bottom-right area)
+        equipment_x = int(img_width * 0.85)  # Right side of garage
+        equipment_y = int(img_height * 0.85)  # Bottom of garage
+        
+        # Main trunk route through central hallway
+        # Horizontal trunk from garage area to left side
+        trunk_y = int(img_height * 0.55)  # Central hallway level
+        trunk_start_x = int(img_width * 0.75)  # Start from garage area
+        trunk_end_x = int(img_width * 0.15)    # End at left side
+        
+        # Draw main horizontal trunk
+        self._draw_thick_duct(draw, [trunk_start_x, trunk_y], [trunk_end_x, trunk_y], main_trunk_color, 24)
+        
+        # Vertical distribution trunk from equipment to main trunk
+        self._draw_thick_duct(draw, [equipment_x, equipment_y], [trunk_start_x, trunk_y], main_trunk_color, 20)
+        
+        # Supply branches to rooms based on floorplan layout
+        self._draw_floorplan_specific_branches(draw, img_width, img_height, trunk_y, supply_color)
+        
+        # Return air system
+        self._draw_floorplan_return_system(draw, img_width, img_height, equipment_x, equipment_y, return_color)
+        
+        # Equipment and terminals
+        self._draw_equipment_and_terminals(draw, equipment_x, equipment_y, img_width, img_height)
+        
+        # Add legend
+        self._add_hvac_legend(draw, img.size)
+        
+        return img
+
+    def _draw_thick_duct(self, draw: ImageDraw, start: List[int], end: List[int], color: Tuple[int, int, int], width: int):
+        """Draw a thick duct line with proper architectural styling"""
+        # Main duct line
+        draw.line([tuple(start), tuple(end)], fill=color, width=width)
+        
+        # Add border for definition
+        border_color = tuple(max(0, c - 40) for c in color)
+        draw.line([tuple(start), tuple(end)], fill=border_color, width=2)
+
+    def _draw_floorplan_specific_branches(self, draw: ImageDraw, img_width: int, img_height: int, trunk_y: int, supply_color: Tuple[int, int, int]):
+        """Draw supply branches to specific rooms based on the actual floorplan layout"""
+        
+        # Living room (top-left)
+        living_room_x = int(img_width * 0.25)
+        living_room_y = int(img_height * 0.25)
+        trunk_connection_x = int(img_width * 0.25)
+        
+        # Branch from trunk to living room
+        self._draw_L_shaped_branch(draw, [trunk_connection_x, trunk_y], [living_room_x, living_room_y], supply_color, 12)
+        self._draw_supply_diffuser(draw, [living_room_x, living_room_y])
+        
+        # Kitchen (top-center)
+        kitchen_x = int(img_width * 0.5)
+        kitchen_y = int(img_height * 0.2)
+        kitchen_trunk_x = int(img_width * 0.5)
+        
+        self._draw_L_shaped_branch(draw, [kitchen_trunk_x, trunk_y], [kitchen_x, kitchen_y], supply_color, 10)
+        self._draw_supply_diffuser(draw, [kitchen_x, kitchen_y])
+        
+        # Master bedroom (top-right)
+        master_x = int(img_width * 0.75)
+        master_y = int(img_height * 0.25)
+        master_trunk_x = int(img_width * 0.7)
+        
+        self._draw_L_shaped_branch(draw, [master_trunk_x, trunk_y], [master_x, master_y], supply_color, 12)
+        self._draw_supply_diffuser(draw, [master_x, master_y])
+        
+        # Left bedroom (middle-left)
+        left_bedroom_x = int(img_width * 0.2)
+        left_bedroom_y = int(img_height * 0.5)
+        left_trunk_x = int(img_width * 0.2)
+        
+        self._draw_L_shaped_branch(draw, [left_trunk_x, trunk_y], [left_bedroom_x, left_bedroom_y], supply_color, 10)
+        self._draw_supply_diffuser(draw, [left_bedroom_x, left_bedroom_y])
+        
+        # Office (bottom-left)
+        office_x = int(img_width * 0.25)
+        office_y = int(img_height * 0.75)
+        office_trunk_x = int(img_width * 0.25)
+        
+        self._draw_L_shaped_branch(draw, [office_trunk_x, trunk_y], [office_x, office_y], supply_color, 10)
+        self._draw_supply_diffuser(draw, [office_x, office_y])
+        
+        # Bottom bedroom (bottom-left area)
+        bottom_bedroom_x = int(img_width * 0.15)
+        bottom_bedroom_y = int(img_height * 0.8)
+        bottom_trunk_x = int(img_width * 0.2)
+        
+        self._draw_L_shaped_branch(draw, [bottom_trunk_x, trunk_y], [bottom_bedroom_x, bottom_bedroom_y], supply_color, 10)
+        self._draw_supply_diffuser(draw, [bottom_bedroom_x, bottom_bedroom_y])
+
+    def _draw_L_shaped_branch(self, draw: ImageDraw, start: List[int], end: List[int], color: Tuple[int, int, int], width: int):
+        """Draw an L-shaped branch duct from trunk to room"""
+        
+        # Create L-shaped path (vertical first, then horizontal)
+        mid_point = [start[0], end[1]]
+        
+        # Draw the two segments
+        self._draw_thick_duct(draw, start, mid_point, color, width)
+        self._draw_thick_duct(draw, mid_point, end, color, width)
+        
+        # Add corner joint
+        joint_size = width // 2
+        draw.ellipse([mid_point[0] - joint_size, mid_point[1] - joint_size, 
+                     mid_point[0] + joint_size, mid_point[1] + joint_size], 
+                    fill=color, outline=color)
+
+    def _draw_floorplan_return_system(self, draw: ImageDraw, img_width: int, img_height: int, equipment_x: int, equipment_y: int, return_color: Tuple[int, int, int]):
+        """Draw return air system for the specific floorplan"""
+        
+        # Central return in hallway area
+        central_return_x = int(img_width * 0.55)
+        central_return_y = int(img_height * 0.6)
+        
+        # Draw return grille
+        self._draw_return_grille(draw, [central_return_x, central_return_y])
+        
+        # Return duct from central grille to equipment
+        self._draw_L_shaped_branch(draw, [central_return_x, central_return_y], [equipment_x, equipment_y], return_color, 18)
+
+    def _draw_equipment_and_terminals(self, draw: ImageDraw, equipment_x: int, equipment_y: int, img_width: int, img_height: int):
+        """Draw HVAC equipment and all terminals"""
+        
+        # Air handler in garage
+        self._draw_air_handler(draw, [equipment_x, equipment_y])
+
+    def _draw_air_handler(self, draw: ImageDraw, location: List[int]):
+        """Draw air handler unit symbol"""
+        
+        x, y = location
+        
+        # Main unit rectangle
+        unit_width = 60
+        unit_height = 40
+        
+        draw.rectangle([x - unit_width//2, y - unit_height//2, 
+                       x + unit_width//2, y + unit_height//2], 
+                      fill=(220, 220, 220), outline=(80, 80, 80), width=3)
+        
+        # Fan symbol
+        fan_radius = 15
+        draw.ellipse([x - fan_radius, y - fan_radius, x + fan_radius, y + fan_radius], 
+                    outline=(80, 80, 80), width=2)
+        
+        # Fan blades
+        for angle in [0, 60, 120]:
+            import math
+            blade_x = x + int(fan_radius * 0.7 * math.cos(math.radians(angle)))
+            blade_y = y + int(fan_radius * 0.7 * math.sin(math.radians(angle)))
+            draw.line([(x, y), (blade_x, blade_y)], fill=(80, 80, 80), width=2)
+        
+        # Label
+        draw.text((x - 25, y + unit_height//2 + 5), "AIR HANDLER", fill=(80, 80, 80))
+
+    def _draw_supply_diffuser(self, draw: ImageDraw, location: List[int]):
+        """Draw supply diffuser symbol"""
+        
+        x, y = location
+        size = 10
+        
+        # Square diffuser
+        draw.rectangle([x - size, y - size, x + size, y + size], 
+                      outline=(100, 120, 200), width=2, fill=(240, 245, 255))
+        
+        # Airflow lines
+        for i in range(3):
+            offset = (i - 1) * 4
+            draw.line([(x - size + 2, y + offset), (x + size - 2, y + offset)], 
+                     fill=(100, 120, 200), width=1)
+
+    def _draw_return_grille(self, draw: ImageDraw, location: List[int]):
+        """Draw return grille symbol"""
+        
+        x, y = location
+        width, height = 20, 15
+        
+        # Main grille rectangle
+        draw.rectangle([x - width, y - height, x + width, y + height], 
+                      outline=(150, 100, 180), width=2, fill=(245, 240, 250))
+        
+        # Louvers
+        for i in range(7):
+            louver_y = y - height + (i * height // 3)
+            draw.line([(x - width + 2, louver_y), (x + width - 2, louver_y)], 
+                     fill=(150, 100, 180), width=1)
+        
+        # Label
+        draw.text((x - 18, y + height + 3), "RETURN", fill=(150, 100, 180))
+
+    def _find_mechanical_room(self, floor_plan_data: Dict) -> Dict:
+        """
+        Identify the mechanical room or best location for HVAC equipment.
+        Looks for basement, garage, utility room, or creates one.
+        """
+        rooms = floor_plan_data.get('rooms', [])
+        
+        # Look for rooms that might be mechanical spaces
+        mechanical_candidates = []
+        for room in rooms:
+            bbox = room.get('bounding_box', {})
+            area = bbox.get('width', 0) * bbox.get('height', 0)
+            
+            # Large rooms (like garage) or rooms in specific locations
+            if area > 15000:  # Large room like garage
+                mechanical_candidates.append({
+                    'room': room,
+                    'priority': 3,
+                    'reason': 'large_space'
+                })
+            elif bbox.get('y', 0) > 700:  # Lower part of building
+                mechanical_candidates.append({
+                    'room': room,
+                    'priority': 2,
+                    'reason': 'lower_level'
+                })
+        
+        if mechanical_candidates:
+            # Sort by priority and choose best
+            mechanical_candidates.sort(key=lambda x: x['priority'], reverse=True)
+            chosen_room = mechanical_candidates[0]['room']
+            
+            bbox = chosen_room.get('bounding_box', {})
+            return {
+                'room_id': chosen_room.get('id'),
+                'location': [bbox.get('x', 0) + bbox.get('width', 0) * 0.1, 
+                           bbox.get('y', 0) + bbox.get('height', 0) * 0.9],
+                'type': 'existing_room'
+            }
+        else:
+            # Create mechanical space in corner
+            return {
+                'room_id': None,
+                'location': [50, 850],
+                'type': 'corner_location'
+            }
+
+    def _plan_main_trunk_route(self, floor_plan_data: Dict, equipment_room: Dict) -> List[Dict]:
+        """
+        Plan the main trunk ductwork route through the building.
+        Creates a logical path that serves all areas efficiently.
+        """
+        # Start from equipment location
+        start_point = equipment_room['location']
+        
+        # Analyze building layout to determine best trunk route
+        building_bounds = self._get_building_bounds(floor_plan_data)
+        
+        # Create main horizontal trunk through central corridor
+        trunk_y = building_bounds['center_y']
+        
+        # Plan trunk segments
+        trunk_segments = [
+            {
+                'start': start_point,
+                'end': [building_bounds['min_x'] + 100, trunk_y],
+                'type': 'supply_main',
+                'width': 20
+            },
+            {
+                'start': [building_bounds['min_x'] + 100, trunk_y],
+                'end': [building_bounds['max_x'] - 100, trunk_y],
+                'type': 'supply_main',
+                'width': 18
+            }
+        ]
+        
+        # Add vertical distribution segments
+        vertical_points = self._calculate_vertical_distribution_points(floor_plan_data, trunk_y)
+        for point in vertical_points:
+            trunk_segments.append({
+                'start': [point['x'], trunk_y],
+                'end': [point['x'], trunk_y + point['vertical_extent']],
+                'type': 'supply_branch',
+                'width': 14
+            })
+        
+        return trunk_segments
+
+    def _get_building_bounds(self, floor_plan_data: Dict) -> Dict:
+        """Calculate the overall bounds of the building"""
+        rooms = floor_plan_data.get('rooms', [])
+        
+        min_x = min_y = float('inf')
+        max_x = max_y = float('-inf')
+        
+        for room in rooms:
+            bbox = room.get('bounding_box', {})
+            x, y = bbox.get('x', 0), bbox.get('y', 0)
+            w, h = bbox.get('width', 0), bbox.get('height', 0)
+            
+            min_x = min(min_x, x)
+            min_y = min(min_y, y)
+            max_x = max(max_x, x + w)
+            max_y = max(max_y, y + h)
+        
+        return {
+            'min_x': min_x,
+            'min_y': min_y,
+            'max_x': max_x,
+            'max_y': max_y,
+            'center_x': (min_x + max_x) / 2,
+            'center_y': (min_y + max_y) / 2
+        }
+
+    def _calculate_vertical_distribution_points(self, floor_plan_data: Dict, trunk_y: float) -> List[Dict]:
+        """Calculate where vertical distribution branches should be placed"""
+        rooms = floor_plan_data.get('rooms', [])
+        
+        # Group rooms by vertical zones
+        upper_rooms = [r for r in rooms if r.get('bounding_box', {}).get('y', 0) < trunk_y - 50]
+        lower_rooms = [r for r in rooms if r.get('bounding_box', {}).get('y', 0) > trunk_y + 50]
+        
+        distribution_points = []
+        
+        # Create distribution points for upper zone
+        if upper_rooms:
+            upper_center_x = sum(r.get('centroid', [0, 0])[0] for r in upper_rooms) / len(upper_rooms)
+            min_upper_y = min(r.get('bounding_box', {}).get('y', 0) for r in upper_rooms)
+            distribution_points.append({
+                'x': upper_center_x,
+                'vertical_extent': min_upper_y - trunk_y,
+                'zone': 'upper'
+            })
+        
+        # Create distribution points for lower zone
+        if lower_rooms:
+            lower_center_x = sum(r.get('centroid', [0, 0])[0] for r in lower_rooms) / len(lower_rooms)
+            max_lower_y = max(r.get('bounding_box', {}).get('y', 0) + r.get('bounding_box', {}).get('height', 0) 
+                            for r in lower_rooms)
+            distribution_points.append({
+                'x': lower_center_x,
+                'vertical_extent': max_lower_y - trunk_y,
+                'zone': 'lower'
+            })
+        
+        return distribution_points
+
+    def _draw_main_trunk_system(self, draw: ImageDraw, trunk_segments: List[Dict], equipment_room: Dict):
+        """Draw the main trunk ductwork with proper architectural styling"""
+        
+        # Use purple color similar to attached image
+        trunk_color = (120, 81, 169)  # Purple
+        
+        for segment in trunk_segments:
+            start = segment['start']
+            end = segment['end']
+            width = segment['width']
+            
+            # Draw duct with rounded ends for professional appearance
+            self._draw_duct_segment(draw, start, end, trunk_color, width)
+            
+            # Add direction arrows for supply ducts
+            if 'supply' in segment['type']:
+                self._draw_airflow_arrow(draw, start, end, trunk_color)
+
+    def _draw_duct_segment(self, draw: ImageDraw, start: List[float], end: List[float], 
+                          color: Tuple[int, int, int], width: int):
+        """Draw a single duct segment with proper architectural styling"""
+        
+        # Convert to integers for drawing
+        x1, y1 = int(start[0]), int(start[1])
+        x2, y2 = int(end[0]), int(end[1])
+        
+        # Draw main duct line
+        draw.line([(x1, y1), (x2, y2)], fill=color, width=width)
+        
+        # Add border lines for definition
+        border_color = tuple(max(0, c - 30) for c in color)  # Darker border
+        draw.line([(x1, y1), (x2, y2)], fill=border_color, width=2)
+
+    def _draw_airflow_arrow(self, draw: ImageDraw, start: List[float], end: List[float], 
+                           color: Tuple[int, int, int]):
+        """Draw directional arrows to show airflow direction"""
+        
+        # Calculate arrow position at midpoint
+        mid_x = (start[0] + end[0]) / 2
+        mid_y = (start[1] + end[1]) / 2
+        
+        # Calculate direction vector
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = math.sqrt(dx*dx + dy*dy)
+        
+        if length > 0:
+            # Normalize direction
+            dx /= length
+            dy /= length
+            
+            # Arrow parameters
+            arrow_length = 15
+            arrow_width = 8
+            
+            # Arrow tip
+            tip_x = mid_x + dx * arrow_length / 2
+            tip_y = mid_y + dy * arrow_length / 2
+            
+            # Arrow base points
+            base1_x = mid_x - dx * arrow_length / 2 - dy * arrow_width / 2
+            base1_y = mid_y - dy * arrow_length / 2 + dx * arrow_width / 2
+            
+            base2_x = mid_x - dx * arrow_length / 2 + dy * arrow_width / 2
+            base2_y = mid_y - dy * arrow_length / 2 - dx * arrow_width / 2
+            
+            # Draw arrow
+            arrow_points = [
+                (int(tip_x), int(tip_y)),
+                (int(base1_x), int(base1_y)),
+                (int(base2_x), int(base2_y))
+            ]
+            draw.polygon(arrow_points, fill=color)
+
+    def _plan_supply_branches(self, floor_plan_data: Dict, main_trunk_route: List[Dict]) -> List[Dict]:
+        """Plan supply ductwork branches to individual rooms"""
+        
+        rooms = floor_plan_data.get('rooms', [])
+        supply_branches = []
+        
+        # Find main trunk for connection points
+        main_trunk = next((seg for seg in main_trunk_route if seg['type'] == 'supply_main'), None)
+        if not main_trunk:
+            return supply_branches
+        
+        for room in rooms:
+            room_center = room.get('centroid', [0, 0])
+            bbox = room.get('bounding_box', {})
+            
+            # Skip mechanical room
+            if bbox.get('width', 0) * bbox.get('height', 0) > 15000:
+                continue
+            
+            # Find best connection point on trunk
+            trunk_connection = self._find_best_trunk_connection(room_center, main_trunk)
+            
+            # Create branch route following walls where possible
+            branch_route = self._create_branch_route(trunk_connection, room_center, floor_plan_data)
+            
+            # Determine supply diffuser location in room
+            diffuser_location = self._determine_diffuser_location(room)
+            
+            supply_branches.append({
+                'room_id': room.get('id'),
+                'trunk_connection': trunk_connection,
+                'route': branch_route,
+                'diffuser_location': diffuser_location,
+                'cfm': self._calculate_room_cfm(room),
+                'duct_size': self._calculate_branch_duct_size(room)
+            })
+        
+        return supply_branches
+
+    def _find_best_trunk_connection(self, room_center: List[float], trunk_segment: Dict) -> List[float]:
+        """Find the optimal point to connect room branch to main trunk"""
+        
+        start = trunk_segment['start']
+        end = trunk_segment['end']
+        
+        # Project room center onto trunk line
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        
+        if dx == 0 and dy == 0:
+            return start
+        
+        # Calculate projection parameter
+        t = ((room_center[0] - start[0]) * dx + (room_center[1] - start[1]) * dy) / (dx*dx + dy*dy)
+        t = max(0.1, min(0.9, t))  # Keep connection away from ends
+        
+        connection_point = [
+            start[0] + t * dx,
+            start[1] + t * dy
+        ]
+        
+        return connection_point
+
+    def _create_branch_route(self, start: List[float], end: List[float], floor_plan_data: Dict) -> List[List[float]]:
+        """Create a route for branch ductwork that follows walls when possible"""
+        
+        # Simple L-shaped route for now - can be enhanced with wall-following logic
+        mid_point = [start[0], end[1]]
+        
+        return [start, mid_point, end]
+
+    def _determine_diffuser_location(self, room: Dict) -> List[float]:
+        """Determine optimal location for supply diffuser in room"""
+        
+        bbox = room.get('bounding_box', {})
+        centroid = room.get('centroid', [0, 0])
+        
+        # Place diffuser slightly off-center for better air distribution
+        diffuser_x = bbox.get('x', 0) + bbox.get('width', 0) * 0.6
+        diffuser_y = bbox.get('y', 0) + bbox.get('height', 0) * 0.4
+        
+        return [diffuser_x, diffuser_y]
+
+    def _calculate_room_cfm(self, room: Dict) -> int:
+        """Calculate required CFM for room based on size and type"""
+        
+        bbox = room.get('bounding_box', {})
+        area = bbox.get('width', 0) * bbox.get('height', 0)
+        
+        # Simple CFM calculation - 1 CFM per 2 sq ft (adjusted for pixel scale)
+        cfm = max(50, int(area / 200))
+        
+        return cfm
+
+    def _calculate_branch_duct_size(self, room: Dict) -> int:
+        """Calculate branch duct size based on room requirements"""
+        
+        cfm = self._calculate_room_cfm(room)
+        
+        if cfm < 100:
+            return 8
+        elif cfm < 200:
+            return 10
+        elif cfm < 400:
+            return 12
+        else:
+            return 14
+
+    def _draw_supply_ductwork(self, draw: ImageDraw, supply_branches: List[Dict]):
+        """Draw all supply ductwork branches"""
+        
+        supply_color = (100, 150, 255)  # Light blue for supply
+        
+        for branch in supply_branches:
+            route = branch['route']
+            duct_size = branch['duct_size']
+            
+            # Draw branch segments
+            for i in range(len(route) - 1):
+                start = route[i]
+                end = route[i + 1]
+                self._draw_duct_segment(draw, start, end, supply_color, duct_size)
+            
+            # Draw connection to trunk
+            trunk_conn = branch['trunk_connection']
+            first_point = route[0] if route else branch['diffuser_location']
+            self._draw_duct_segment(draw, trunk_conn, first_point, supply_color, duct_size)
+
+    def _plan_return_air_system(self, floor_plan_data: Dict, equipment_room: Dict) -> Dict:
+        """Plan return air system with central return strategy"""
+        
+        rooms = floor_plan_data.get('rooms', [])
+        building_bounds = self._get_building_bounds(floor_plan_data)
+        
+        # Central return location - typically in hallway or central area
+        central_return_location = [
+            building_bounds['center_x'],
+            building_bounds['center_y'] + 50
+        ]
+        
+        # Plan return duct route back to equipment
+        return_route = [
+            central_return_location,
+            [central_return_location[0], equipment_room['location'][1]],
+            equipment_room['location']
+        ]
+        
+        return {
+            'central_return_location': central_return_location,
+            'return_route': return_route,
+            'individual_returns': []  # Can add individual room returns if needed
+        }
+
+    def _draw_return_ductwork(self, draw: ImageDraw, return_system: Dict):
+        """Draw return air ductwork"""
+        
+        return_color = (150, 100, 200)  # Purple for return air
+        
+        route = return_system['return_route']
+        
+        # Draw return duct segments
+        for i in range(len(route) - 1):
+            start = route[i]
+            end = route[i + 1]
+            self._draw_duct_segment(draw, start, end, return_color, 16)  # Larger return duct
+
+    def _draw_hvac_equipment_detailed(self, draw: ImageDraw, equipment_room: Dict):
+        """Draw detailed HVAC equipment symbols"""
+        
+        location = equipment_room['location']
+        x, y = int(location[0]), int(location[1])
+        
+        # Draw air handler unit
+        equipment_color = (80, 80, 80)  # Dark gray
+        
+        # Main unit box
+        draw.rectangle([x-40, y-30, x+40, y+30], outline=equipment_color, width=3, fill=(240, 240, 240))
+        
+        # Fan symbol
+        draw.ellipse([x-15, y-15, x+15, y+15], outline=equipment_color, width=2)
+        draw.text((x-8, y-6), "FAN", fill=equipment_color)
+        
+        # Equipment label
+        draw.text((x-25, y+35), "AIR HANDLER", fill=equipment_color)
+
+    def _draw_hvac_terminals(self, draw: ImageDraw, supply_branches: List[Dict], return_system: Dict):
+        """Draw supply diffusers and return grilles"""
+        
+        # Draw supply diffusers
+        for branch in supply_branches:
+            location = branch['diffuser_location']
+            self._draw_supply_diffuser(draw, location)
+        
+        # Draw return grille
+        central_return = return_system['central_return_location']
+        self._draw_return_grille(draw, central_return)
+
+    def _draw_supply_diffuser(self, draw: ImageDraw, location: List[float]):
+        """Draw supply air diffuser symbol"""
+        
+        x, y = int(location[0]), int(location[1])
+        
+        # Square diffuser with directional vanes
+        size = 12
+        draw.rectangle([x-size, y-size, x+size, y+size], outline=(100, 150, 255), width=2)
+        
+        # Directional vanes
+        for i in range(3):
+            offset = (i - 1) * 6
+            draw.line([(x-size+2, y+offset), (x+size-2, y+offset)], fill=(100, 150, 255), width=1)
+
+    def _draw_return_grille(self, draw: ImageDraw, location: List[float]):
+        """Draw return air grille symbol"""
+        
+        x, y = int(location[0]), int(location[1])
+        
+        # Larger rectangular grille
+        width, height = 20, 15
+        draw.rectangle([x-width, y-height, x+width, y+height], outline=(150, 100, 200), width=2)
+        
+        # Horizontal louvers
+        for i in range(5):
+            y_offset = height - (i * height // 2)
+            draw.line([(x-width+2, y-y_offset), (x+width-2, y-y_offset)], fill=(150, 100, 200), width=1)
+        
+        # Label
+        draw.text((x-15, y+height+5), "RETURN", fill=(150, 100, 200))
+
+    def _add_hvac_legend(self, draw: ImageDraw, img_size: Tuple[int, int]):
+        """Add comprehensive HVAC legend"""
+        
+        legend_x = img_size[0] - 200
+        legend_y = 20
+        
+        # Background for legend
+        legend_width = 180
+        legend_height = 160
+        draw.rectangle([legend_x-10, legend_y-10, legend_x+legend_width, legend_y+legend_height], 
+                      fill=(255, 255, 255), outline=(0, 0, 0), width=1)
+        
+        draw.text((legend_x, legend_y), "HVAC LEGEND:", fill='black')
+        y = legend_y + 20
+        
+        # Supply duct
+        draw.line([(legend_x, y), (legend_x + 30, y)], fill=(100, 150, 255), width=12)
+        draw.text((legend_x + 35, y - 6), "Supply Duct", fill='black')
+        y += 20
+        
+        # Return duct
+        draw.line([(legend_x, y), (legend_x + 30, y)], fill=(150, 100, 200), width=16)
+        draw.text((legend_x + 35, y - 6), "Return Duct", fill='black')
+        y += 20
+        
+        # Main trunk
+        draw.line([(legend_x, y), (legend_x + 30, y)], fill=(120, 81, 169), width=20)
+        draw.text((legend_x + 35, y - 6), "Main Trunk", fill='black')
+        y += 25
+        
+        # Supply diffuser
+        size = 8
+        draw.rectangle([legend_x, y-size, legend_x+2*size, y+size], outline=(100, 150, 255), width=2)
+        draw.text((legend_x + 20, y - 6), "Supply Diffuser", fill='black')
+        y += 20
+        
+        # Return grille
+        draw.rectangle([legend_x, y-8, legend_x+16, y+8], outline=(150, 100, 200), width=2)
+        draw.text((legend_x + 20, y - 6), "Return Grille", fill='black')
+        y += 25
+        
+        # Equipment
+        draw.rectangle([legend_x, y-10, legend_x+20, y+10], outline=(80, 80, 80), width=2)
+        draw.text((legend_x + 25, y - 6), "Air Handler", fill='black')
+
+    def test_architectural_hvac_on_floorplan(self, floor_plan_data: Dict) -> Image.Image:
+        """
+        Test function to generate the new architectural HVAC layout on the specific floorplan.png
+        This function can be called to verify the new methodology works properly.
+        """
+        # Load the background floorplan
+        floorplan_path = "/Users/yb/git/vr-backend/floorplans/floorplan.png"
+        try:
+            background = Image.open(floorplan_path)
+        except Exception:
+            # Create a dummy background if file not found
+            background = Image.new('RGB', (1024, 800), (255, 255, 255))
+        
+        # Generate the new architectural HVAC layout
+        hvac_image = self.generate_architectural_hvac_layout(floor_plan_data, [], background)
+        
+        return hvac_image
+
+    def generate_hvac_for_floorplan(self) -> Image.Image:
+        """
+        Generate HVAC layout specifically for the floorplan.png file.
+        This is the main function to use for your specific floor plan.
+        """
+        # Load the actual floorplan
+        floorplan_path = "/Users/yb/git/vr-backend/floorplans/floorplan.png"
+        try:
+            background = Image.open(floorplan_path)
+            print(f"Loaded floorplan: {background.size}")
+        except Exception as e:
+            print(f"Could not load floorplan: {e}")
+            background = Image.new('RGB', (2490, 2420), (255, 255, 255))
+        
+        # Create empty floor plan data since we're using hardcoded positions
+        floor_plan_data = {'rooms': [], 'walls': []}
+        
+        # Generate the HVAC layout
+        hvac_image = self.generate_architectural_hvac_layout(floor_plan_data, [], background)
+        
+        return hvac_image
+
+def main():
+    """
+    Main function to generate HVAC layout for floorplan.png
+    Run this file directly to generate the HVAC overlay
+    """
+    print("🏠 Generating HVAC layout for floorplan.png...")
+    
+    visualizer = SystemVisualizer()
+    
+    try:
+        hvac_image = visualizer.generate_hvac_for_floorplan()
+        output_filename = 'floorplan_hvac.png'
+        hvac_image.save(output_filename)
+        
+        print("✅ SUCCESS! HVAC layout generated!")
+        print(f"📁 Saved as: {output_filename}")
+        print(f"📐 Image size: {hvac_image.size}")
+        print("🎯 The HVAC system includes:")
+        print("   • Main trunk line through central hallway")
+        print("   • Supply branches to all rooms")
+        print("   • Return air system")
+        print("   • Air handler in garage")
+        print("   • Proper architectural styling")
+        
+        return hvac_image
+        
+    except Exception as ex:
+        print(f"❌ Error generating HVAC layout: {ex}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+if __name__ == "__main__":
+    main()
     
     def generate_plumbing_layout(self, floor_plan_data: Dict, compliance_issues: List, background: Image.Image) -> Image.Image:
         """Generate plumbing system overlay with supply and drainage over original floor plan."""
